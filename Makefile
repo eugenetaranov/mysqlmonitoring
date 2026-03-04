@@ -50,7 +50,46 @@ release-snapshot: ## Create snapshot release
 release-check: ## Check GoReleaser configuration
 	goreleaser check
 
-.PHONY: demo-up demo-down demo
+build-all: build-linux build-darwin ## Build for all platforms
+
+build-linux: ## Build for Linux (amd64, arm64)
+	@mkdir -p $(BUILD_DIR)
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY)-linux-amd64 ./cmd/mysqlmonitoring
+	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY)-linux-arm64 ./cmd/mysqlmonitoring
+
+build-darwin: ## Build for macOS (amd64, arm64)
+	@mkdir -p $(BUILD_DIR)
+	CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY)-darwin-amd64 ./cmd/mysqlmonitoring
+	CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY)-darwin-arm64 ./cmd/mysqlmonitoring
+
+release: ## Create and push a release tag
+	@if [ -z "$(TAG)" ]; then \
+		LATEST=$$(git tag --sort=-version:refname 2>/dev/null | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$$' | head -1); \
+		if [ -z "$$LATEST" ]; then \
+			SUGGESTED="v0.1.0"; \
+		else \
+			MAJOR=$$(echo $$LATEST | sed 's/v\([0-9]*\)\.\([0-9]*\)\.\([0-9]*\)/\1/'); \
+			MINOR=$$(echo $$LATEST | sed 's/v\([0-9]*\)\.\([0-9]*\)\.\([0-9]*\)/\2/'); \
+			PATCH=$$(echo $$LATEST | sed 's/v\([0-9]*\)\.\([0-9]*\)\.\([0-9]*\)/\3/'); \
+			PATCH=$$((PATCH + 1)); \
+			SUGGESTED="v$$MAJOR.$$MINOR.$$PATCH"; \
+		fi; \
+		echo "Latest tag: $${LATEST:-none}"; \
+		printf "Enter tag [$$SUGGESTED]: "; \
+		read INPUT_TAG; \
+		TAG=$${INPUT_TAG:-$$SUGGESTED}; \
+		echo "Creating release $$TAG..."; \
+		git tag -a $$TAG -m "Release $$TAG" && \
+		git push origin $$TAG && \
+		echo "Release $$TAG pushed. GitHub Actions will build and publish artifacts."; \
+	else \
+		echo "Creating release $(TAG)..."; \
+		git tag -a $(TAG) -m "Release $(TAG)" && \
+		git push origin $(TAG) && \
+		echo "Release $(TAG) pushed. GitHub Actions will build and publish artifacts."; \
+	fi
+
+.PHONY: build-all build-linux build-darwin release demo-up demo-down demo
 
 demo-up: ## Start demo MySQL + workload generators
 	docker compose -f tests/demo/docker-compose.yaml up -d

@@ -70,3 +70,46 @@ release:
   draft: false
   prerelease: auto
   mode: replace
+  header: |
+    ## mysqlmonitoring {{ .Version }}
+
+    MySQL lock monitor - detect lock contention, long transactions, and deadlocks.
+  footer: |
+    ## Installation
+
+    ### Homebrew (macOS/Linux)
+    ```bash
+    brew install eugenetaranov/tap/mysqlmonitoring
+    ```
+
+    ### Direct Download
+    Download the appropriate binary for your platform from the assets below.
+
+    ### Build from Source
+    ```bash
+    go install github.com/eugenetaranov/mysqlmonitoring/cmd/mysqlmonitoring@{{ .Tag }}
+    ```
+
+# Homebrew Tap
+brews:
+  - name: mysqlmonitoring
+    repository:
+      owner: eugenetaranov
+      name: homebrew-tap
+      branch: main
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    directory: Formula
+    homepage: "https://github.com/eugenetaranov/mysqlmonitoring"
+    description: "MySQL lock monitor - detect lock contention, long transactions, and deadlocks"
+    license: "MIT"
+    commit_author:
+      name: goreleaserbot
+      email: bot@goreleaser.com
+    commit_msg_template: "Brew formula update for {{ .ProjectName }} version {{ .Tag }}"
+    dependencies:
+      - name: go
+        type: optional
+    test: |
+      system "#{bin}/mysqlmonitoring", "--version"
+    install: |
+      bin.install "mysqlmonitoring"
