@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/eugenetaranov/mysqlmonitoring/internal/db"
 	"github.com/eugenetaranov/mysqlmonitoring/internal/killer"
@@ -59,7 +59,7 @@ func (m Model) Init() tea.Cmd {
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		return m.handleKey(msg)
 
 	case tea.WindowSizeMsg:
@@ -102,7 +102,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// Handle confirmation popup keys first
 	if m.confirmKill {
 		switch msg.String() {
@@ -165,18 +165,20 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m Model) View() string {
+func (m Model) View() tea.View {
 	if m.quitting {
-		return ""
+		return tea.NewView("")
 	}
-	return renderMain(m)
+	v := tea.NewView(renderMain(m))
+	v.AltScreen = true
+	return v
 }
 
 // Run starts the TUI.
 func Run(resultCh <-chan monitor.Result, database db.DB) error {
 	k := killer.New(database)
 	model := NewModel(resultCh, k)
-	p := tea.NewProgram(model, tea.WithAltScreen())
+	p := tea.NewProgram(model)
 	_, err := p.Run()
 	return err
 }
