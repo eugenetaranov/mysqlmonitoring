@@ -4,6 +4,24 @@ Real-time MySQL lock contention monitor with terminal UI.
 
 ## Installation
 
+### Homebrew (macOS/Linux)
+
+```bash
+brew install eugenetaranov/tap/mysqlmonitoring
+```
+
+### Download Binary
+
+Grab the latest release from [GitHub Releases](https://github.com/eugenetaranov/mysqlmonitoring/releases) and place it in your `$PATH`.
+
+### Build from Source
+
+```bash
+go install github.com/eugenetaranov/mysqlmonitoring/cmd/mysqlmonitoring@latest
+```
+
+Or clone and build locally:
+
 ```bash
 make build          # builds to ./bin/mysqlmonitoring
 make install        # builds and copies to /usr/local/bin
