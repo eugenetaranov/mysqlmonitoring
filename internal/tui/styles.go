@@ -1,6 +1,6 @@
 package tui
 
-import "github.com/charmbracelet/lipgloss"
+import "charm.land/lipgloss/v2"
 
 var (
 	titleStyle = lipgloss.NewStyle().
@@ -40,17 +40,8 @@ var (
 			Bold(true).
 			Foreground(lipgloss.Color("196"))
 
-	// connectorStyle renders tree connectors (┌├└──) in bright white without bold,
-	// so box-drawing characters don't get stretched in terminals that widen bold glyphs.
-	connectorStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("15"))
-
 	// Selected variants: same foreground colors but with selected background
 	selectedBg = lipgloss.Color("237")
-
-	selectedConnectorStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.Color("15")).
-				Background(selectedBg)
 
 	selectedDangerStyle = lipgloss.NewStyle().
 				Bold(true).

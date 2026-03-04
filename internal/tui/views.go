@@ -481,7 +481,7 @@ func renderLockTreeNav(m Model) string {
 			if waiterCount > maxWaiters {
 				if waiterCount == maxWaiters+1 {
 					remaining := totalWaiters - maxWaiters
-					b.WriteString("  " + connectorStyle.Render("└──") + dimStyle.Render(fmt.Sprintf(" ... %d more waiting", remaining)) + "\n")
+					b.WriteString("  " + "└──" + dimStyle.Render(fmt.Sprintf(" ... %d more waiting", remaining)) + "\n")
 				}
 				continue
 			}
@@ -545,7 +545,7 @@ func renderLockTreeNav(m Model) string {
 					connector = "└"
 				}
 			}
-			line := hs.Render(connector+" ") + ds.Render(label) + hs.Render(" "+fmt.Sprintf("PID:%d %s@%s", e.pid, e.user, stripPort(e.host)))
+			line := connector + hs.Render(" ") + ds.Render(label) + hs.Render(" "+fmt.Sprintf("PID:%d %s@%s", e.pid, e.user, stripPort(e.host)))
 			if e.waitMs > 0 {
 				line += ds.Render(" "+humanDuration(e.waitMs))
 			}
@@ -580,7 +580,7 @@ func renderLockTreeNav(m Model) string {
 			}
 			b.WriteString(prefix + line)
 		} else {
-			// Waiter: bright white connector, dim rest
+			// Waiter: unstyled connector, dim rest
 			connector := "├──"
 			if e.isLast || waiterCount == maxWaiters {
 				connector = "└──"
@@ -600,7 +600,7 @@ func renderLockTreeNav(m Model) string {
 			if ql != "" {
 				dimPart += " [" + ql + "]"
 			}
-			b.WriteString(prefix + connectorStyle.Render(connector) + dimStyle.Render(dimPart))
+			b.WriteString(prefix + connector + dimStyle.Render(dimPart))
 		}
 		b.WriteString("\n")
 	}
