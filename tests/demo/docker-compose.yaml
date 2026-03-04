@@ -1,0 +1,28 @@
+services:
+  mysql:
+    image: mysql:8.0
+    ports:
+      - "13306:3306"
+    environment:
+      MYSQL_ROOT_PASSWORD: demopass
+      MYSQL_DATABASE: demodb
+    command:
+      - --performance-schema=ON
+      - --innodb-lock-wait-timeout=120
+    volumes:
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-pdemopass"]
+      interval: 3s
+      timeout: 5s
+      retries: 10
+
+  workload:
+    image: python:3.12-slim
+    depends_on:
+      mysql:
+        condition: service_healthy
+    volumes:
+      - ./workload.py:/workload.py:ro
+    command: ["sh", "-c", "pip install --quiet mysql-connector-python && python -u /workload.py"]
+    restart: on-failure

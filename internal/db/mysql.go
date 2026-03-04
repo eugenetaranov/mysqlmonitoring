@@ -1,0 +1,307 @@
+package db
+
+import (
+	"context"
+	"database/sql"
+	"fmt"
+	"strconv"
+	"strings"
+
+	_ "github.com/go-sql-driver/mysql"
+)
+
+// MySQLDB implements the DB interface for MySQL/MariaDB.
+type MySQLDB struct {
+	db         *sql.DB
+	serverInfo *ServerInfo
+}
+
+// NewMySQL creates a new MySQL connection.
+func NewMySQL(dsn string) (*MySQLDB, error) {
+	parsed, err := ParseDSN(dsn)
+	if err != nil {
+		return nil, fmt.Errorf("invalid DSN: %w", err)
+	}
+
+	sqlDB, err := sql.Open("mysql", parsed)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open database: %w", err)
+	}
+
+	sqlDB.SetMaxOpenConns(3)
+	sqlDB.SetMaxIdleConns(1)
+
+	if err := sqlDB.Ping(); err != nil {
+		sqlDB.Close()
+		return nil, fmt.Errorf("failed to ping database: %w", err)
+	}
+
+	return &MySQLDB{db: sqlDB}, nil
+}
+
+func (m *MySQLDB) Close() error {
+	return m.db.Close()
+}
+
+func (m *MySQLDB) ServerInfo(ctx context.Context) (ServerInfo, error) {
+	if m.serverInfo != nil {
+		return *m.serverInfo, nil
+	}
+
+	var version string
+	if err := m.db.QueryRowContext(ctx, "SELECT VERSION()").Scan(&version); err != nil {
+		return ServerInfo{}, fmt.Errorf("failed to get version: %w", err)
+	}
+
+	info := ServerInfo{
+		Version:   version,
+		IsMariaDB: strings.Contains(strings.ToLower(version), "mariadb"),
+		IsAurora:  strings.Contains(strings.ToLower(version), "aurora"),
+	}
+	info.VersionNumber = parseVersionNumber(version)
+
+	// Detect RDS by checking for mysql.rds_kill procedure
+	if !info.IsMariaDB {
+		var count int
+		err := m.db.QueryRowContext(ctx,
+			"SELECT COUNT(*) FROM information_schema.ROUTINES WHERE ROUTINE_SCHEMA = 'mysql' AND ROUTINE_NAME = 'rds_kill'").Scan(&count)
+		if err == nil && count > 0 {
+			info.IsRDS = true
+		}
+	}
+
+	m.serverInfo = &info
+	return info, nil
+}
+
+func parseVersionNumber(version string) int {
+	// Strip MariaDB suffix etc.
+	v := version
+	if idx := strings.Index(v, "-"); idx > 0 {
+		v = v[:idx]
+	}
+
+	parts := strings.Split(v, ".")
+	if len(parts) < 3 {
+		return 0
+	}
+
+	major, _ := strconv.Atoi(parts[0])
+	minor, _ := strconv.Atoi(parts[1])
+	patch, _ := strconv.Atoi(parts[2])
+
+	return major*10000 + minor*100 + patch
+}
+
+func (m *MySQLDB) ConnectionID(ctx context.Context) (uint64, error) {
+	var id uint64
+	err := m.db.QueryRowContext(ctx, "SELECT CONNECTION_ID()").Scan(&id)
+	return id, err
+}
+
+func (m *MySQLDB) Transactions(ctx context.Context) ([]Transaction, error) {
+	query := `
+		SELECT
+			p.ID, p.USER, p.HOST, COALESCE(p.DB, ''), p.COMMAND, COALESCE(p.TIME, 0),
+			COALESCE(p.STATE, ''), COALESCE(p.INFO, ''),
+			COALESCE(esc.DIGEST_TEXT, ''),
+			COALESCE(t.trx_id, ''), COALESCE(t.trx_state, ''),
+			COALESCE(t.trx_started, NOW())
+		FROM information_schema.PROCESSLIST p
+		LEFT JOIN information_schema.INNODB_TRX t ON p.ID = t.trx_mysql_thread_id
+		LEFT JOIN performance_schema.threads pt ON pt.PROCESSLIST_ID = p.ID
+		LEFT JOIN performance_schema.events_statements_current esc ON esc.THREAD_ID = pt.THREAD_ID
+		WHERE t.trx_id IS NOT NULL
+		ORDER BY t.trx_started ASC`
+
+	rows, err := m.db.QueryContext(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query transactions: %w", err)
+	}
+	defer rows.Close()
+
+	var txns []Transaction
+	for rows.Next() {
+		var t Transaction
+		if err := rows.Scan(&t.ID, &t.User, &t.Host, &t.DB, &t.Command, &t.Time,
+			&t.State, &t.Query, &t.DigestText, &t.TrxID, &t.TrxState, &t.TrxStarted); err != nil {
+			return nil, fmt.Errorf("failed to scan transaction: %w", err)
+		}
+		txns = append(txns, t)
+	}
+	return txns, rows.Err()
+}
+
+func (m *MySQLDB) LockWaits(ctx context.Context) ([]LockWait, error) {
+	info, err := m.ServerInfo(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	if info.IsMariaDB || info.VersionNumber < 80000 {
+		return m.lockWaits57(ctx)
+	}
+	return m.lockWaits80(ctx)
+}
+
+func (m *MySQLDB) lockWaits57(ctx context.Context) ([]LockWait, error) {
+	query := `
+		SELECT
+			COALESCE(r.trx_id, ''), COALESCE(r.trx_mysql_thread_id, 0),
+			COALESCE(r.trx_query, ''),
+			COALESCE(res.DIGEST_TEXT, ''),
+			COALESCE(rp.USER, ''), COALESCE(rp.HOST, ''),
+			COALESCE(b.trx_id, ''), COALESCE(b.trx_mysql_thread_id, 0),
+			COALESCE(b.trx_query, COALESCE(bes.SQL_TEXT, '')),
+			COALESCE(bes.DIGEST_TEXT, ''),
+			COALESCE(bp.USER, ''), COALESCE(bp.HOST, ''),
+			COALESCE(bl.lock_table, ''), COALESCE(bl.lock_index, ''),
+			COALESCE(bl.lock_mode, ''),
+			COALESCE(r.trx_wait_started, NOW()),
+			CAST(COALESCE(TIMESTAMPDIFF(MICROSECOND, r.trx_wait_started, NOW()) / 1000, 0) AS SIGNED)
+		FROM information_schema.INNODB_LOCK_WAITS w
+		JOIN information_schema.INNODB_TRX r ON r.trx_id = w.requesting_trx_id
+		JOIN information_schema.INNODB_TRX b ON b.trx_id = w.blocking_trx_id
+		JOIN information_schema.INNODB_LOCKS bl ON bl.lock_id = w.blocking_lock_id
+		LEFT JOIN information_schema.PROCESSLIST rp ON rp.ID = r.trx_mysql_thread_id
+		LEFT JOIN information_schema.PROCESSLIST bp ON bp.ID = b.trx_mysql_thread_id
+		LEFT JOIN performance_schema.threads rt ON rt.PROCESSLIST_ID = r.trx_mysql_thread_id
+		LEFT JOIN performance_schema.events_statements_current res ON res.THREAD_ID = rt.THREAD_ID
+		LEFT JOIN performance_schema.threads bt ON bt.PROCESSLIST_ID = b.trx_mysql_thread_id
+		LEFT JOIN performance_schema.events_statements_current bes ON bes.THREAD_ID = bt.THREAD_ID`
+
+	return m.queryLockWaits(ctx, query)
+}
+
+func (m *MySQLDB) lockWaits80(ctx context.Context) ([]LockWait, error) {
+	query := `
+		SELECT
+			COALESCE(r.trx_id, ''), COALESCE(r.trx_mysql_thread_id, 0),
+			COALESCE(r.trx_query, ''),
+			COALESCE(res.DIGEST_TEXT, ''),
+			COALESCE(rp.USER, ''), COALESCE(rp.HOST, ''),
+			COALESCE(b.trx_id, ''), COALESCE(b.trx_mysql_thread_id, 0),
+			COALESCE(b.trx_query, COALESCE(bes.SQL_TEXT, '')),
+			COALESCE(bes.DIGEST_TEXT, ''),
+			COALESCE(bp.USER, ''), COALESCE(bp.HOST, ''),
+			CONCAT(COALESCE(bl.OBJECT_SCHEMA, ''), '.', COALESCE(bl.OBJECT_NAME, '')), COALESCE(bl.INDEX_NAME, ''),
+			COALESCE(bl.LOCK_MODE, ''),
+			COALESCE(r.trx_wait_started, NOW()),
+			CAST(COALESCE(TIMESTAMPDIFF(MICROSECOND, r.trx_wait_started, NOW()) / 1000, 0) AS SIGNED)
+		FROM performance_schema.data_lock_waits w
+		JOIN information_schema.INNODB_TRX r ON r.trx_id = w.REQUESTING_ENGINE_TRANSACTION_ID
+		JOIN information_schema.INNODB_TRX b ON b.trx_id = w.BLOCKING_ENGINE_TRANSACTION_ID
+		JOIN performance_schema.data_locks bl ON bl.ENGINE_LOCK_ID = w.BLOCKING_ENGINE_LOCK_ID
+		LEFT JOIN information_schema.PROCESSLIST rp ON rp.ID = r.trx_mysql_thread_id
+		LEFT JOIN information_schema.PROCESSLIST bp ON bp.ID = b.trx_mysql_thread_id
+		LEFT JOIN performance_schema.threads rt ON rt.PROCESSLIST_ID = r.trx_mysql_thread_id
+		LEFT JOIN performance_schema.events_statements_current res ON res.THREAD_ID = rt.THREAD_ID
+		LEFT JOIN performance_schema.threads bt ON bt.PROCESSLIST_ID = b.trx_mysql_thread_id
+		LEFT JOIN performance_schema.events_statements_current bes ON bes.THREAD_ID = bt.THREAD_ID`
+
+	return m.queryLockWaits(ctx, query)
+}
+
+func (m *MySQLDB) queryLockWaits(ctx context.Context, query string) ([]LockWait, error) {
+	rows, err := m.db.QueryContext(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query lock waits: %w", err)
+	}
+	defer rows.Close()
+
+	var waits []LockWait
+	for rows.Next() {
+		var lw LockWait
+		if err := rows.Scan(
+			&lw.WaitingTrxID, &lw.WaitingPID, &lw.WaitingQuery,
+			&lw.WaitingDigest,
+			&lw.WaitingUser, &lw.WaitingHost,
+			&lw.BlockingTrxID, &lw.BlockingPID, &lw.BlockingQuery,
+			&lw.BlockingDigest,
+			&lw.BlockingUser, &lw.BlockingHost,
+			&lw.LockTable, &lw.LockIndex, &lw.LockType,
+			&lw.WaitStarted, &lw.WaitDurationMs,
+		); err != nil {
+			return nil, fmt.Errorf("failed to scan lock wait: %w", err)
+		}
+		waits = append(waits, lw)
+	}
+	return waits, rows.Err()
+}
+
+func (m *MySQLDB) Processes(ctx context.Context) ([]Process, error) {
+	query := `SELECT ID, USER, HOST, COALESCE(DB, ''), COMMAND, COALESCE(TIME, 0), COALESCE(STATE, ''), COALESCE(INFO, '') FROM information_schema.PROCESSLIST ORDER BY TIME DESC`
+
+	rows, err := m.db.QueryContext(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query processes: %w", err)
+	}
+	defer rows.Close()
+
+	var procs []Process
+	for rows.Next() {
+		var p Process
+		if err := rows.Scan(&p.ID, &p.User, &p.Host, &p.DB, &p.Command, &p.Time, &p.State, &p.Info); err != nil {
+			return nil, fmt.Errorf("failed to scan process: %w", err)
+		}
+		procs = append(procs, p)
+	}
+	return procs, rows.Err()
+}
+
+func (m *MySQLDB) MetadataLocks(ctx context.Context) ([]MetadataLock, error) {
+	query := `
+		SELECT
+			COALESCE(THREAD_ID, 0),
+			COALESCE(LOCK_TYPE, ''),
+			COALESCE(LOCK_DURATION, ''),
+			COALESCE(LOCK_MODE, ''),
+			COALESCE(OBJECT_TYPE, ''),
+			COALESCE(OBJECT_SCHEMA, ''),
+			COALESCE(OBJECT_NAME, '')
+		FROM performance_schema.metadata_locks
+		WHERE OBJECT_TYPE = 'TABLE'
+		ORDER BY THREAD_ID`
+
+	rows, err := m.db.QueryContext(ctx, query)
+	if err != nil {
+		// metadata_locks may not be available
+		return nil, nil
+	}
+	defer rows.Close()
+
+	var locks []MetadataLock
+	for rows.Next() {
+		var ml MetadataLock
+		if err := rows.Scan(&ml.ThreadID, &ml.LockType, &ml.Duration, &ml.LockMode,
+			&ml.ObjectType, &ml.ObjectSchema, &ml.ObjectName); err != nil {
+			return nil, fmt.Errorf("failed to scan metadata lock: %w", err)
+		}
+		locks = append(locks, ml)
+	}
+	return locks, rows.Err()
+}
+
+func (m *MySQLDB) InnoDBStatus(ctx context.Context) (InnoDBStatus, error) {
+	var typ, name, status string
+	err := m.db.QueryRowContext(ctx, "SHOW ENGINE INNODB STATUS").Scan(&typ, &name, &status)
+	if err != nil {
+		return InnoDBStatus{}, fmt.Errorf("failed to get innodb status: %w", err)
+	}
+
+	return ParseInnoDBStatus(status), nil
+}
+
+func (m *MySQLDB) KillConnection(ctx context.Context, id uint64) error {
+	info, err := m.ServerInfo(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get server info: %w", err)
+	}
+
+	if info.IsRDS || info.IsAurora {
+		_, err = m.db.ExecContext(ctx, "CALL mysql.rds_kill(?)", id)
+	} else {
+		_, err = m.db.ExecContext(ctx, fmt.Sprintf("KILL %d", id))
+	}
+	return err
+}
