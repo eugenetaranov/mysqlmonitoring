@@ -31,7 +31,7 @@ func BuildDSN(cfg DSNConfig) string {
 }
 
 // ParseDSN validates and normalizes a DSN string.
-// Accepts either go-sql-driver format or mysql:// URI format.
+// Accepts go-sql-driver format, mysql:// URI format, or simplified user:pass@host:port/db format.
 func ParseDSN(dsn string) (string, error) {
 	if dsn == "" {
 		return "", fmt.Errorf("DSN is empty")
@@ -42,7 +42,12 @@ func ParseDSN(dsn string) (string, error) {
 		return convertURIToDSN(dsn)
 	}
 
-	// Assume go-sql-driver format, add parseTime if missing
+	// Handle simplified format: user:pass@host:port/db -> wrap host:port in tcp()
+	if strings.Contains(dsn, "@") && !strings.Contains(dsn, "@tcp(") {
+		dsn = convertSimpleDSN(dsn)
+	}
+
+	// Add parseTime if missing
 	if !strings.Contains(dsn, "parseTime") {
 		if strings.Contains(dsn, "?") {
 			dsn += "&parseTime=true"
@@ -52,6 +57,32 @@ func ParseDSN(dsn string) (string, error) {
 	}
 
 	return dsn, nil
+}
+
+// convertSimpleDSN converts user:pass@host:port/db to user:pass@tcp(host:port)/db.
+func convertSimpleDSN(dsn string) string {
+	atIdx := strings.LastIndex(dsn, "@")
+	userInfo := dsn[:atIdx]
+	rest := dsn[atIdx+1:] // host:port/db?params
+
+	// Split off query params
+	hostDB := rest
+	params := ""
+	if qIdx := strings.Index(rest, "?"); qIdx >= 0 {
+		hostDB = rest[:qIdx]
+		params = rest[qIdx:]
+	}
+
+	// Split host:port from /db
+	slashIdx := strings.Index(hostDB, "/")
+	hostPort := hostDB
+	dbPart := ""
+	if slashIdx >= 0 {
+		hostPort = hostDB[:slashIdx]
+		dbPart = hostDB[slashIdx:]
+	}
+
+	return userInfo + "@tcp(" + hostPort + ")" + dbPart + params
 }
 
 func convertURIToDSN(uri string) (string, error) {

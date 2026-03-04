@@ -32,8 +32,14 @@ make install        # builds and copies to /usr/local/bin
 ```bash
 mysqlmonitoring monitor --host 127.0.0.1 --port 3306 --user root --password secret
 # or with a DSN
-mysqlmonitoring monitor --dsn "root:secret@tcp(127.0.0.1:3306)/mydb"
+mysqlmonitoring monitor --dsn "root:secret@127.0.0.1:3306/mydb"
+# or using ~/.my.cnf credentials automatically
+mysqlmonitoring monitor
 ```
+
+Connection parameters are resolved in priority order: `--dsn` flag > explicit CLI flags (`--host`, `--user`, etc.) > `~/.my.cnf` `[client]` section > built-in defaults (localhost:3306, root).
+
+Use `--defaults-file` to specify an alternate `.my.cnf` path.
 
 ## Commands
 

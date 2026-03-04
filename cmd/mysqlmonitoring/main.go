@@ -34,6 +34,7 @@ type flags struct {
 	user               string
 	password           string
 	database           string
+	defaultsFile       string
 	interval           int
 	lockWaitThreshold  int
 	longQueryThreshold int
@@ -52,12 +53,13 @@ func main() {
 
 	// Common flags
 	pf := rootCmd.PersistentFlags()
-	pf.StringVar(&f.dsn, "dsn", "", "MySQL DSN (e.g. user:pass@tcp(host:port)/db)")
+	pf.StringVar(&f.dsn, "dsn", "", "MySQL DSN (e.g. user:pass@host:port/db)")
 	pf.StringVar(&f.host, "host", "localhost", "MySQL host")
 	pf.IntVar(&f.port, "port", 3306, "MySQL port")
 	pf.StringVar(&f.user, "user", "root", "MySQL user")
 	pf.StringVar(&f.password, "password", "", "MySQL password")
 	pf.StringVar(&f.database, "database", "", "MySQL database")
+	pf.StringVar(&f.defaultsFile, "defaults-file", "", "Path to .my.cnf defaults file (default: ~/.my.cnf)")
 
 	monitorCmd := &cobra.Command{
 		Use:   "monitor",
@@ -66,7 +68,7 @@ func main() {
 			if !cmd.Flags().Changed("output") {
 				f.outputFormat = "tui"
 			}
-			return runMonitor(f)
+			return runMonitor(f, cmd)
 		},
 	}
 	monitorCmd.Flags().IntVar(&f.interval, "interval", 2, "Poll interval in seconds")
@@ -82,7 +84,7 @@ func main() {
 			if !cmd.Flags().Changed("output") {
 				f.outputFormat = "text"
 			}
-			return runStatus(f)
+			return runStatus(f, cmd)
 		},
 	}
 	statusCmd.Flags().IntVar(&f.lockWaitThreshold, "lock-wait-threshold", 10, "Lock wait warning threshold in seconds")
@@ -94,7 +96,7 @@ func main() {
 		Short: "Kill a MySQL connection",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runKill(f, args[0])
+			return runKill(f, cmd, args[0])
 		},
 	}
 
@@ -105,21 +107,54 @@ func main() {
 	}
 }
 
-func buildDSN(f flags) string {
+func buildDSN(f flags, cmd *cobra.Command) string {
 	if f.dsn != "" {
 		return f.dsn
 	}
-	return db.BuildDSN(db.DSNConfig{
-		Host:     f.host,
-		Port:     f.port,
-		User:     f.user,
-		Password: f.password,
-		Database: f.database,
-	})
+
+	// Read .my.cnf defaults
+	cnfPath := f.defaultsFile
+	if cnfPath == "" {
+		cnfPath = db.DefaultMyCnfPath()
+	}
+	cnf, _ := db.ReadMyCnf(cnfPath)
+
+	// Start from .my.cnf values, then override with explicit CLI flags
+	cfg := cnf
+
+	// Apply hardcoded defaults for fields not set by .my.cnf
+	if cfg.Host == "" {
+		cfg.Host = "localhost"
+	}
+	if cfg.Port == 0 {
+		cfg.Port = 3306
+	}
+	if cfg.User == "" {
+		cfg.User = "root"
+	}
+
+	// Explicit CLI flags override .my.cnf
+	if cmd.Flags().Changed("host") {
+		cfg.Host = f.host
+	}
+	if cmd.Flags().Changed("port") {
+		cfg.Port = f.port
+	}
+	if cmd.Flags().Changed("user") {
+		cfg.User = f.user
+	}
+	if cmd.Flags().Changed("password") {
+		cfg.Password = f.password
+	}
+	if cmd.Flags().Changed("database") {
+		cfg.Database = f.database
+	}
+
+	return db.BuildDSN(cfg)
 }
 
-func connect(f flags) (*db.MySQLDB, error) {
-	dsn := buildDSN(f)
+func connect(f flags, cmd *cobra.Command) (*db.MySQLDB, error) {
+	dsn := buildDSN(f, cmd)
 	return db.NewMySQL(dsn)
 }
 
@@ -150,8 +185,8 @@ func secondsToDuration(s int) time.Duration {
 	return time.Duration(s) * time.Second
 }
 
-func runMonitor(f flags) error {
-	database, err := connect(f)
+func runMonitor(f flags, cmd *cobra.Command) error {
+	database, err := connect(f, cmd)
 	if err != nil {
 		return fmt.Errorf("failed to connect: %w", err)
 	}
@@ -229,8 +264,8 @@ func runMonitor(f flags) error {
 	return nil
 }
 
-func runStatus(f flags) error {
-	database, err := connect(f)
+func runStatus(f flags, cmd *cobra.Command) error {
+	database, err := connect(f, cmd)
 	if err != nil {
 		return fmt.Errorf("failed to connect: %w", err)
 	}
@@ -264,13 +299,13 @@ func runStatus(f flags) error {
 	return nil
 }
 
-func runKill(f flags, connIDStr string) error {
+func runKill(f flags, cmd *cobra.Command, connIDStr string) error {
 	connID, err := strconv.ParseUint(connIDStr, 10, 64)
 	if err != nil {
 		return fmt.Errorf("invalid connection ID: %s", connIDStr)
 	}
 
-	database, err := connect(f)
+	database, err := connect(f, cmd)
 	if err != nil {
 		return fmt.Errorf("failed to connect: %w", err)
 	}

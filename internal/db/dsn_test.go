@@ -71,6 +71,26 @@ func TestParseDSN(t *testing.T) {
 			want: "root:pass@tcp(localhost:3306)/db?parseTime=true",
 		},
 		{
+			name: "simplified format with port",
+			dsn:  "root:pass@localhost:3306/db",
+			want: "root:pass@tcp(localhost:3306)/db?parseTime=true",
+		},
+		{
+			name: "simplified format without port",
+			dsn:  "root:pass@localhost/db",
+			want: "root:pass@tcp(localhost)/db?parseTime=true",
+		},
+		{
+			name: "simplified format with params",
+			dsn:  "root:pass@localhost:3306/db?timeout=5s",
+			want: "root:pass@tcp(localhost:3306)/db?timeout=5s&parseTime=true",
+		},
+		{
+			name: "simplified format no database",
+			dsn:  "root:pass@localhost:3306",
+			want: "root:pass@tcp(localhost:3306)?parseTime=true",
+		},
+		{
 			name:    "empty DSN",
 			dsn:     "",
 			wantErr: true,
