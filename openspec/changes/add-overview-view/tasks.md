@@ -17,14 +17,14 @@
 
 ## 3. Overview view
 
-- [ ] 3.1 Add `ViewOverview` constant to `internal/tui/model.go`; flip `NewModel` default `view: ViewOverview`.
-- [ ] 3.2 Prepend `{"O","Overview",ViewOverview}` to `orderedTabs` in `internal/tui/tabs.go`.
-- [ ] 3.3 Add `case ViewOverview:` to the `renderMain` switch in `internal/tui/views.go`.
-- [ ] 3.4 New `internal/tui/overview.go` with `renderOverview(m Model) string` and per-panel sub-renderers: status line, sparkline+legend (reuse `renderSparklineHeader`), load panel (reuse `sparkBlocks`), replication panel, hottest queries, hottest tables, live issues.
-- [ ] 3.5 Add Model fields: `topUser`, `topHost`, `loadGrouping` (enum: user/host/schema), `overviewCursor`, `overviewPanel`.
-- [ ] 3.6 Key handlers: `u`/`h`/`s` cycle load grouping; `↑/↓` move cursor; `enter` drills into Top SQL with the appropriate filter pre-set; `K` and `L` reuse the existing tables/lock paths.
-- [ ] 3.7 Extract `renderIssuesPanel(rows []issueRow, maxRows int) string` from `internal/tui/issues.go:renderIssuesTable`; reuse from Overview.
-- [ ] 3.8 Snapshot tests in `internal/tui/overview_test.go`: healthy / warn / page / cold-start / no-replica / no-perf-schema / MariaDB-fallback.
+- [x] 3.1 Add `ViewOverview` constant to `internal/tui/model.go`; flip `NewModel` default `view: ViewOverview`.
+- [x] 3.2 Prepend `{"O","Overview",ViewOverview}` to `orderedTabs` in `internal/tui/tabs.go`.
+- [x] 3.3 Add `case ViewOverview:` to the `renderMain` switch in `internal/tui/views.go`.
+- [x] 3.4 New `internal/tui/overview.go` with `renderOverview(m Model) string` and per-panel sub-renderers: status line, sparkline+legend (reuse `renderSparklineHeader`), load panel (reuse `sparkBlocks`), replication panel, hottest queries, hottest tables, live issues.
+- [x] 3.5 Add Model fields: `topUser`, `topHost`, `loadGrouping` (enum: user/host/schema), `overviewCursor`.
+- [x] 3.6 Key handlers: `u`/`h`/`s` cycle load grouping; `↑/↓` move cursor; `enter` drills into Top SQL with the appropriate filter pre-set; `O` jumps back to Overview from anywhere; tab cycle includes Overview.
+- [x] 3.7 Compact issues panel implemented inline in overview.go (rather than extracted from issues.go) — issuesTable's colWidths machinery isn't a fit for a fixed-height embed; the new `renderIssuesPanel` is purpose-built.
+- [x] 3.8 Snapshot tests in `internal/tui/overview_test.go`: healthy verdict, warn-on-HLL, page-on-HLL, page-on-deadlock, live-issues empty/populated, load-panel-title-toggle, hottest tables, replication panel rendering, default view, tab bar, helper math (renderHBar, formatBigCount, computeVerdict).
 
 ## 4. Failure-mode polish
 

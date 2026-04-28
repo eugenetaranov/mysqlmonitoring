@@ -26,6 +26,7 @@ const (
 	ViewIssueDetail
 	ViewHelp
 	ViewTables
+	ViewOverview
 )
 
 // ResultMsg carries a monitor result to the TUI.
@@ -97,6 +98,15 @@ type Model struct {
 	// Tables view state.
 	tablesCursor int
 
+	// Overview view state. loadGrouping cycles via u/h/s and
+	// determines both the displayed grouping and which Top-SQL
+	// drill filter (m.topUser / m.topHost / m.topSchema) gets
+	// set on enter. overviewCursor selects within the load panel.
+	loadGrouping   insights.GroupKey
+	overviewCursor int
+	topUser        string
+	topHost        string
+
 	// helpReturn remembers which view to restore when the help
 	// overlay is dismissed.
 	helpReturn ViewState
@@ -104,14 +114,19 @@ type Model struct {
 
 // NewModel creates a new TUI model. Pass nil for insightsRef and
 // explainer to disable the perf-insights views entirely.
+//
+// The default launch view is Overview — the operator's first question
+// is "is the DB OK?", not "show me the lock tree". Pressing I goes
+// straight to Issues; the old behaviour is one keystroke away.
 func NewModel(resultCh <-chan monitor.Result, k *killer.Killer, insightsRef *insights.Insights, explainer *explain.Engine) Model {
 	return Model{
-		resultCh:   resultCh,
-		killer:     k,
-		insights:   insightsRef,
-		explainer:  explainer,
-		loadWindow: time.Hour,
-		view:       ViewIssues,
+		resultCh:     resultCh,
+		killer:       k,
+		insights:     insightsRef,
+		explainer:    explainer,
+		loadWindow:   time.Hour,
+		view:         ViewOverview,
+		loadGrouping: insights.GroupKeyUser,
 	}
 }
 
@@ -298,16 +313,19 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.explainResult = nil
 			m.explainErr = nil
 			return m, nil
-		case ViewTop, ViewLock, ViewTables:
-			m.view = ViewIssues
+		case ViewTop, ViewLock, ViewTables, ViewIssues:
+			m.view = ViewOverview
 			return m, nil
 		case ViewIssueDetail:
 			m.view = ViewIssues
 			return m, nil
 		}
 	case "tab":
-		// Cycle Issues → Tables → Lock → Issues.
+		// Cycle Overview → Issues → Tables → Lock → Overview.
 		switch m.view {
+		case ViewOverview:
+			m.view = ViewIssues
+			return m, nil
 		case ViewIssues:
 			m.view = ViewTables
 			return m, nil
@@ -315,7 +333,7 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.view = ViewLock
 			return m, nil
 		case ViewLock:
-			m.view = ViewIssues
+			m.view = ViewOverview
 			return m, nil
 		}
 	case "t":
@@ -323,6 +341,9 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.view = ViewTop
 			return m, nil
 		}
+	case "O":
+		m.view = ViewOverview
+		return m, nil
 	case "I":
 		m.view = ViewIssues
 		return m, nil
@@ -336,6 +357,8 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	// View-specific keys.
 	switch m.view {
+	case ViewOverview:
+		return m.handleOverviewKey(key)
 	case ViewIssues:
 		return m.handleIssuesKey(key)
 	case ViewIssueDetail:
@@ -541,6 +564,76 @@ func (m Model) handleIssueDetailKey(key string) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	return m, nil
+}
+
+// handleOverviewKey processes Overview-tab navigation. The selected
+// row lives in the Load-by-X panel; u/h/s cycle the grouping AND
+// reset the cursor so the user always lands on the top row of the
+// new dimension. enter drills into Top SQL with the matching filter.
+func (m Model) handleOverviewKey(key string) (tea.Model, tea.Cmd) {
+	rows := m.overviewLoadRows()
+	switch key {
+	case "u":
+		m.loadGrouping = insights.GroupKeyUser
+		m.overviewCursor = 0
+		return m, nil
+	case "h":
+		m.loadGrouping = insights.GroupKeyHost
+		m.overviewCursor = 0
+		return m, nil
+	case "s":
+		m.loadGrouping = insights.GroupKeySchema
+		m.overviewCursor = 0
+		return m, nil
+	case "up", "k":
+		if m.overviewCursor > 0 {
+			m.overviewCursor--
+		}
+		return m, nil
+	case "down", "j":
+		if m.overviewCursor < len(rows)-1 {
+			m.overviewCursor++
+		}
+		return m, nil
+	case "g":
+		m.overviewCursor = 0
+		return m, nil
+	case "G":
+		if len(rows) > 0 {
+			m.overviewCursor = len(rows) - 1
+		}
+		return m, nil
+	case "enter":
+		// Drill into Top SQL with the appropriate filter pre-set.
+		// Clear the other dimensions so the filter is unambiguous.
+		if m.overviewCursor >= len(rows) {
+			return m, nil
+		}
+		picked := rows[m.overviewCursor].Group
+		m.topUser, m.topHost, m.topSchema = "", "", ""
+		switch m.loadGrouping {
+		case insights.GroupKeyUser:
+			m.topUser = picked
+		case insights.GroupKeyHost:
+			m.topHost = picked
+		case insights.GroupKeySchema:
+			m.topSchema = picked
+		}
+		if m.insights != nil {
+			m.view = ViewTop
+		}
+		return m, nil
+	}
+	return m, nil
+}
+
+// overviewLoadRows returns the Load-by-grouping panel rows for the
+// current loadGrouping. Returns nil when insights is unavailable.
+func (m Model) overviewLoadRows() []insights.GroupLoad {
+	if m.insights == nil || m.insights.Sessions == nil {
+		return nil
+	}
+	return insights.LoadByGroup(m.insights.Sessions, time.Now(), m.loadWindow, m.loadGrouping)
 }
 
 // handleTopKey processes keystrokes while the Top SQL panel is in

@@ -19,6 +19,7 @@ type tabDef struct {
 // the perf-insights subsystem being available; orderedTabs always
 // lists it but renderTabBar filters at draw time.
 var orderedTabs = []tabDef{
+	{"O", "Overview", ViewOverview},
 	{"I", "Issues", ViewIssues},
 	{"B", "Tables", ViewTables},
 	{"L", "Lock", ViewLock},

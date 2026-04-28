@@ -521,6 +521,8 @@ func renderView(m Model, body string) string {
 
 func renderMain(m Model) string {
 	switch m.view {
+	case ViewOverview:
+		return renderView(m, renderOverview(m))
 	case ViewIssues:
 		return renderView(m, renderIssuesView(m))
 	case ViewIssueDetail:
@@ -747,6 +749,9 @@ func renderStatusBar(m Model) string {
 	}
 
 	switch m.view {
+	case ViewOverview:
+		status += " | u/h/s:group j/k enter:drill I:issues B:tables L:lock t:top ?:help"
+		return status
 	case ViewIssues:
 		if m.issuesTableFilter != "" {
 			status += " | filter=" + m.issuesTableFilter
