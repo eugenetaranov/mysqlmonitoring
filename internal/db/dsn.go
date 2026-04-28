@@ -24,8 +24,10 @@ func BuildDSN(cfg DSNConfig) string {
 		cfg.User = "root"
 	}
 
-	// user:password@tcp(host:port)/database?params
-	dsn := fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?parseTime=true&timeout=5s&readTimeout=10s",
+	// readTimeout is intentionally well above the per-query context timeout so it
+	// acts as a backstop for dead sockets without preempting context cancellation
+	// (which is what triggers the driver's KILL QUERY path).
+	dsn := fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?parseTime=true&timeout=5s&readTimeout=60s&interpolateParams=true",
 		cfg.User, cfg.Password, cfg.Host, cfg.Port, cfg.Database)
 	return dsn
 }

@@ -3,12 +3,69 @@ package db
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
+	"errors"
 	"fmt"
+	"io"
+	"log"
+	"net"
 	"strconv"
 	"strings"
+	"time"
 
-	_ "github.com/go-sql-driver/mysql"
+	"github.com/go-sql-driver/mysql"
 )
+
+func init() {
+	// Silence the driver's stderr logger — its packet/IO timeout messages
+	// otherwise bleed into the TUI. Errors still surface via returned error
+	// values from QueryContext.
+	_ = mysql.SetLogger(log.New(io.Discard, "", 0))
+}
+
+// queryWithRetry runs QueryContext and retries once on a transient connection
+// error. The retry uses a fresh context with the same deadline so a stuck
+// connection can't double the caller's budget.
+func (m *MySQLDB) queryWithRetry(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
+	rows, err := m.db.QueryContext(ctx, query, args...)
+	if err == nil || !isTransientConnErr(err) {
+		return rows, err
+	}
+	return m.db.QueryContext(ctx, query, args...)
+}
+
+// queryRowWithRetry is the QueryRowContext analogue.
+func (m *MySQLDB) queryRowWithRetry(ctx context.Context, query string, args ...any) *sql.Row {
+	row := m.db.QueryRowContext(ctx, query, args...)
+	if err := row.Err(); err != nil && isTransientConnErr(err) {
+		return m.db.QueryRowContext(ctx, query, args...)
+	}
+	return row
+}
+
+// isTransientConnErr reports whether err is the kind of connection-level
+// failure that's safe to retry once on a fresh pool connection.
+func isTransientConnErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, driver.ErrBadConn) || errors.Is(err, mysql.ErrInvalidConn) {
+		return true
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return true
+	}
+	s := err.Error()
+	return strings.Contains(s, "invalid connection") ||
+		strings.Contains(s, "broken pipe") ||
+		strings.Contains(s, "connection reset")
+}
+
+// queryTimeoutHint caps server-side execution at 5s for monitoring SELECTs.
+// Recognized by MySQL 5.7.4+; silently ignored as a comment elsewhere
+// (MariaDB, older MySQL), where the per-query context timeout still applies.
+const queryTimeoutHint = "/*+ MAX_EXECUTION_TIME(5000) */"
 
 // MySQLDB implements the DB interface for MySQL/MariaDB.
 type MySQLDB struct {
@@ -30,6 +87,11 @@ func NewMySQL(dsn string) (*MySQLDB, error) {
 
 	sqlDB.SetMaxOpenConns(3)
 	sqlDB.SetMaxIdleConns(1)
+	sqlDB.SetConnMaxLifetime(5 * time.Minute)
+	// Close idle connections before the server's wait_timeout (default 28800s,
+	// but proxies/load balancers commonly drop idle conns much sooner) so we
+	// avoid the "invalid connection" failure on the first poll after idle.
+	sqlDB.SetConnMaxIdleTime(30 * time.Second)
 
 	if err := sqlDB.Ping(); err != nil {
 		sqlDB.Close()
@@ -49,7 +111,7 @@ func (m *MySQLDB) ServerInfo(ctx context.Context) (ServerInfo, error) {
 	}
 
 	var version string
-	if err := m.db.QueryRowContext(ctx, "SELECT VERSION()").Scan(&version); err != nil {
+	if err := m.queryRowWithRetry(ctx, "SELECT VERSION()").Scan(&version); err != nil {
 		return ServerInfo{}, fmt.Errorf("failed to get version: %w", err)
 	}
 
@@ -101,7 +163,7 @@ func (m *MySQLDB) ConnectionID(ctx context.Context) (uint64, error) {
 
 func (m *MySQLDB) Transactions(ctx context.Context) ([]Transaction, error) {
 	query := `
-		SELECT
+		SELECT ` + queryTimeoutHint + `
 			p.ID, p.USER, p.HOST, COALESCE(p.DB, ''), p.COMMAND, COALESCE(p.TIME, 0),
 			COALESCE(p.STATE, ''), COALESCE(p.INFO, ''),
 			COALESCE(esc.DIGEST_TEXT, ''),
@@ -114,7 +176,7 @@ func (m *MySQLDB) Transactions(ctx context.Context) ([]Transaction, error) {
 		WHERE t.trx_id IS NOT NULL
 		ORDER BY t.trx_started ASC`
 
-	rows, err := m.db.QueryContext(ctx, query)
+	rows, err := m.queryWithRetry(ctx, query)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query transactions: %w", err)
 	}
@@ -146,7 +208,7 @@ func (m *MySQLDB) LockWaits(ctx context.Context) ([]LockWait, error) {
 
 func (m *MySQLDB) lockWaits57(ctx context.Context) ([]LockWait, error) {
 	query := `
-		SELECT
+		SELECT ` + queryTimeoutHint + `
 			COALESCE(r.trx_id, ''), COALESCE(r.trx_mysql_thread_id, 0),
 			COALESCE(r.trx_query, ''),
 			COALESCE(res.DIGEST_TEXT, ''),
@@ -175,7 +237,7 @@ func (m *MySQLDB) lockWaits57(ctx context.Context) ([]LockWait, error) {
 
 func (m *MySQLDB) lockWaits80(ctx context.Context) ([]LockWait, error) {
 	query := `
-		SELECT
+		SELECT ` + queryTimeoutHint + `
 			COALESCE(r.trx_id, ''), COALESCE(r.trx_mysql_thread_id, 0),
 			COALESCE(r.trx_query, ''),
 			COALESCE(res.DIGEST_TEXT, ''),
@@ -203,7 +265,7 @@ func (m *MySQLDB) lockWaits80(ctx context.Context) ([]LockWait, error) {
 }
 
 func (m *MySQLDB) queryLockWaits(ctx context.Context, query string) ([]LockWait, error) {
-	rows, err := m.db.QueryContext(ctx, query)
+	rows, err := m.queryWithRetry(ctx, query)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query lock waits: %w", err)
 	}
@@ -230,9 +292,9 @@ func (m *MySQLDB) queryLockWaits(ctx context.Context, query string) ([]LockWait,
 }
 
 func (m *MySQLDB) Processes(ctx context.Context) ([]Process, error) {
-	query := `SELECT ID, USER, HOST, COALESCE(DB, ''), COMMAND, COALESCE(TIME, 0), COALESCE(STATE, ''), COALESCE(INFO, '') FROM information_schema.PROCESSLIST ORDER BY TIME DESC`
+	query := `SELECT ` + queryTimeoutHint + ` ID, USER, HOST, COALESCE(DB, ''), COMMAND, COALESCE(TIME, 0), COALESCE(STATE, ''), COALESCE(INFO, '') FROM information_schema.PROCESSLIST ORDER BY TIME DESC`
 
-	rows, err := m.db.QueryContext(ctx, query)
+	rows, err := m.queryWithRetry(ctx, query)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query processes: %w", err)
 	}
@@ -251,7 +313,7 @@ func (m *MySQLDB) Processes(ctx context.Context) ([]Process, error) {
 
 func (m *MySQLDB) MetadataLocks(ctx context.Context) ([]MetadataLock, error) {
 	query := `
-		SELECT
+		SELECT ` + queryTimeoutHint + `
 			COALESCE(THREAD_ID, 0),
 			COALESCE(LOCK_TYPE, ''),
 			COALESCE(LOCK_DURATION, ''),
@@ -263,7 +325,7 @@ func (m *MySQLDB) MetadataLocks(ctx context.Context) ([]MetadataLock, error) {
 		WHERE OBJECT_TYPE = 'TABLE'
 		ORDER BY THREAD_ID`
 
-	rows, err := m.db.QueryContext(ctx, query)
+	rows, err := m.queryWithRetry(ctx, query)
 	if err != nil {
 		// metadata_locks may not be available
 		return nil, nil
@@ -284,7 +346,7 @@ func (m *MySQLDB) MetadataLocks(ctx context.Context) ([]MetadataLock, error) {
 
 func (m *MySQLDB) InnoDBStatus(ctx context.Context) (InnoDBStatus, error) {
 	var typ, name, status string
-	err := m.db.QueryRowContext(ctx, "SHOW ENGINE INNODB STATUS").Scan(&typ, &name, &status)
+	err := m.queryRowWithRetry(ctx, "SHOW ENGINE INNODB STATUS").Scan(&typ, &name, &status)
 	if err != nil {
 		return InnoDBStatus{}, fmt.Errorf("failed to get innodb status: %w", err)
 	}

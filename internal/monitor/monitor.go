@@ -68,38 +68,56 @@ func New(database db.DB, cfg Config) *Monitor {
 	}
 }
 
+// queryTimeout caps each individual monitoring query. When the deadline fires,
+// go-sql-driver/mysql issues KILL QUERY on a separate connection so the server
+// stops the work — without this, server-side queries can outlive the client and
+// pile up across reconnects.
+const queryTimeout = 5 * time.Second
+
 // Snapshot takes a single point-in-time snapshot.
 func (m *Monitor) Snapshot(ctx context.Context) Result {
 	snap := db.Snapshot{Time: time.Now()}
 
-	info, err := m.database.ServerInfo(ctx)
+	infoCtx, cancel := context.WithTimeout(ctx, queryTimeout)
+	info, err := m.database.ServerInfo(infoCtx)
+	cancel()
 	if err != nil {
 		return Result{Snapshot: snap, Error: fmt.Errorf("server info: %w", err)}
 	}
 	snap.ServerInfo = info
 
-	snap.Transactions, err = m.database.Transactions(ctx)
+	txnCtx, cancel := context.WithTimeout(ctx, queryTimeout)
+	snap.Transactions, err = m.database.Transactions(txnCtx)
+	cancel()
 	if err != nil {
 		return Result{Snapshot: snap, Error: fmt.Errorf("transactions: %w", err)}
 	}
 
-	snap.LockWaits, err = m.database.LockWaits(ctx)
+	lwCtx, cancel := context.WithTimeout(ctx, queryTimeout)
+	snap.LockWaits, err = m.database.LockWaits(lwCtx)
+	cancel()
 	if err != nil {
 		return Result{Snapshot: snap, Error: fmt.Errorf("lock waits: %w", err)}
 	}
 
-	snap.Processes, err = m.database.Processes(ctx)
+	procCtx, cancel := context.WithTimeout(ctx, queryTimeout)
+	snap.Processes, err = m.database.Processes(procCtx)
+	cancel()
 	if err != nil {
 		return Result{Snapshot: snap, Error: fmt.Errorf("processes: %w", err)}
 	}
 
-	snap.MetadataLocks, err = m.database.MetadataLocks(ctx)
+	mlCtx, cancel := context.WithTimeout(ctx, queryTimeout)
+	snap.MetadataLocks, err = m.database.MetadataLocks(mlCtx)
+	cancel()
 	if err != nil {
 		// Non-fatal, metadata locks may not be available
 		snap.MetadataLocks = nil
 	}
 
-	snap.InnoDBStatus, _ = m.database.InnoDBStatus(ctx)
+	innoCtx, cancel := context.WithTimeout(ctx, queryTimeout)
+	snap.InnoDBStatus, _ = m.database.InnoDBStatus(innoCtx)
+	cancel()
 
 	// Run detectors
 	var issues []detector.Issue
@@ -139,6 +157,12 @@ func (m *Monitor) Run(ctx context.Context) <-chan Result {
 				case ch <- result:
 				default:
 					// Drop if consumer is slow
+				}
+				// If Snapshot ran longer than the interval, drop the queued
+				// tick instead of immediately firing another poll.
+				select {
+				case <-ticker.C:
+				default:
 				}
 			}
 		}

@@ -16,17 +16,17 @@ func TestBuildDSN(t *testing.T) {
 		{
 			name: "full config",
 			cfg:  DSNConfig{Host: "localhost", Port: 3306, User: "root", Password: "secret", Database: "testdb"},
-			want: "root:secret@tcp(localhost:3306)/testdb?parseTime=true&timeout=5s&readTimeout=10s",
+			want: "root:secret@tcp(localhost:3306)/testdb?parseTime=true&timeout=5s&readTimeout=60s&interpolateParams=true",
 		},
 		{
 			name: "defaults",
 			cfg:  DSNConfig{Host: "db.example.com"},
-			want: "root:@tcp(db.example.com:3306)/?parseTime=true&timeout=5s&readTimeout=10s",
+			want: "root:@tcp(db.example.com:3306)/?parseTime=true&timeout=5s&readTimeout=60s&interpolateParams=true",
 		},
 		{
 			name: "custom port",
 			cfg:  DSNConfig{Host: "localhost", Port: 3307, User: "admin", Password: "pass", Database: "mydb"},
-			want: "admin:pass@tcp(localhost:3307)/mydb?parseTime=true&timeout=5s&readTimeout=10s",
+			want: "admin:pass@tcp(localhost:3307)/mydb?parseTime=true&timeout=5s&readTimeout=60s&interpolateParams=true",
 		},
 	}
 
