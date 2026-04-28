@@ -2,6 +2,35 @@
 
 ## Unreleased
 
+### Changed — Default view is now **Overview**
+
+`mysqlmonitoring monitor` opens on a new **Overview** tab instead of
+**Issues**. The Overview answers "is the database OK?" in one frame
+with a status verdict, AAS sparkline, load attribution by user / host
+/ schema, replication state (when applicable), live issues, and
+hottest queries / tables. Press `I` for the old default; `O` jumps
+back to Overview from anywhere.
+
+### Added — Health vitals collector
+
+A small additional poller (default every 5s) cherry-picks a handful
+of `SHOW GLOBAL STATUS` counters (`Threads_running`,
+`Threads_connected`, buffer-pool dirty / total / read requests / reads,
+`Aborted_clients`) and, when the server has a replica role, runs
+`SHOW REPLICA STATUS` (or `SHOW SLAVE STATUS` on older servers /
+MariaDB). Cost is at most two `SHOW` statements per cycle; the
+replica query is conditional on a one-time probe.
+
+InnoDB History List Length is now parsed from the existing
+`SHOW ENGINE INNODB STATUS` output (no new query).
+
+### Added — Per-user/host load attribution
+
+`series.SessionSample` carries `User` / `Host`, populated from the
+existing `performance_schema.threads` JOIN in the `CurrentStatements`
+query (no new round-trip). New `insights.LoadByGroup` aggregates AAS
+by user / host / schema purely in-memory.
+
 ### Added — Milestone 1: Performance Insights (CLI)
 
 The first slice of self-hosted Performance Insights / SolarWinds DPA

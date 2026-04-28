@@ -36,6 +36,6 @@
 
 ## 5. Docs / shipping
 
-- [ ] 5.1 README: short Overview screenshot section + 3-line description; update existing tab list.
-- [ ] 5.2 CHANGELOG entry calling out the default-view flip.
-- [ ] 5.3 Live smoke against fresh MySQL 8.0 container (see verification in proposal); confirm Overview is first frame, sparkline ticks, panels populate within 12s, and `u`/`h`/`s` cycle works.
+- [x] 5.1 README: new "Overview tab (default)" section describing the verdict line, panels, key bindings, and degradation behaviour. Updated TUI Controls table.
+- [x] 5.2 CHANGELOG: "Changed — Default view is now Overview" entry plus "Added — Health vitals collector" and "Added — Per-user/host load attribution" entries above the existing M1 block.
+- [ ] 5.3 Live smoke against fresh MySQL 8.0 container (deferred — requires Docker; recipe documented in proposal Verification section).

@@ -100,6 +100,39 @@ CPU is sampled at ~1 Hz from `events_statements_current` for sessions
 that are executing a statement with no current wait; non-CPU classes
 come from `events_waits_summary_global_by_event_name`.
 
+### Overview tab (default)
+
+The TUI opens on the **Overview** tab, designed for the 3am triage
+question: "is the database OK?" One screen, one frame. Keys:
+
+- `O` — back to Overview from anywhere
+- `u` / `h` / `s` — cycle the Load panel between user / host / schema
+- `enter` — drill into Top SQL filtered by the selected user/host/schema
+- `I` / `B` / `L` / `t` — Issues / Tables / Lock chains / Top SQL
+
+The view contains:
+
+- a **status verdict line** — `[HEALTHY]` / `[WARN]` / `[PAGE]` paired
+  with colour, plus key gauges (uptime, AAS over vCPUs, threads
+  running, buffer-pool hit rate, InnoDB History List Length, replica
+  lag, deadlock count). Word + colour are paired so screenshots and
+  colorblind operators don't lose severity.
+- the **DB-load sparkline** by wait class (CPU / IO / Lock / Sync /
+  Network), reused from the perf-insights infrastructure.
+- a **Load by USER/HOST/SCHEMA** panel — top-N attribution from
+  in-memory session samples.
+- a **Replication** panel showing source, IO/SQL thread state, lag,
+  GTID gap. Removed entirely on standalone servers (not greyed —
+  surrounding panels reflow).
+- a compact **Live Issues** panel summarising detector output.
+- **Hottest Queries** (by AAS over the window) and **Hottest Tables**
+  (by issue count + worst severity).
+
+The status line, replication panel, and live issues work without
+`--enable-perf-insights`; the AAS sparkline and load attribution
+need `performance_schema` enabled and panels self-describe their
+state when those data sources are missing.
+
 ### Live perf insights inside the TUI
 
 Pass `--enable-perf-insights` to `monitor` to launch the digest, wait
@@ -188,13 +221,18 @@ make demo-down      # stop demo environment
 
 | Key       | Action |
 |-----------|--------|
-| j/k       | Navigate lock tree (or top-SQL rows when in the Top view) |
-| K         | Kill selected connection |
-| t         | Open Top SQL panel (requires `--enable-perf-insights`) |
-| s         | Cycle Top SQL sort key (AAS → Calls → Latency → Rows) |
-| e / Enter | EXPLAIN the highlighted digest |
-| L         | Return to the lock view |
-| esc       | Back out of Top / EXPLAIN |
+| j/k       | Navigate the focused panel |
+| O         | Overview (default tab) |
+| I         | Issues |
+| B         | Tables |
+| L         | Lock tree |
+| t         | Top SQL (requires `--enable-perf-insights`) |
+| u/h/s     | (Overview) Cycle Load panel between USER / HOST / SCHEMA |
+| enter     | Drill into the focused row (filter set on the next view) |
+| K         | Kill the selected connection |
+| s         | (Top) Cycle sort key — AAS → Calls → Latency → Rows |
+| e / Enter | (Top) EXPLAIN the highlighted digest |
+| esc       | Back out (returns to Overview from most views) |
 | q         | Quit |
 
 ## Development
