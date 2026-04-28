@@ -22,6 +22,7 @@ var orderedTabs = []tabDef{
 	{"O", "Overview", ViewOverview},
 	{"I", "Issues", ViewIssues},
 	{"B", "Tables", ViewTables},
+	{"M", "MDL", ViewMDL},
 	{"L", "Lock", ViewLock},
 	{"t", "Top SQL", ViewTop},
 }

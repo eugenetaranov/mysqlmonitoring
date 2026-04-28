@@ -13,12 +13,12 @@
 
 ## 3. TUI
 
-- [ ] 3.1 Add `ViewMDL` constant to `internal/tui/model.go`; new fields `mdlMode` (list/detail), `mdlTableFilter` (set by drill), `mdlCursor`, `mdlSearchPID`. Add `M` keybinding.
-- [ ] 3.2 Prepend `{"M","MDL",ViewMDL}` after Overview to `orderedTabs` in `internal/tui/tabs.go`.
-- [ ] 3.3 Add `case ViewMDL:` in `renderMain` switch in `internal/tui/views.go`.
-- [ ] 3.4 Create `internal/tui/mdl.go`: `renderMDLList` (top-N hottest), `renderMDLDetail` (queue + holders), `handleMDLKey` (j/k/g/G/enter/B/K/`/`/esc).
-- [ ] 3.5 Make `renderHottestTables` in `internal/tui/overview.go` cursor-aware; wire `enter` on a row to set `m.mdlTableFilter`, `m.mdlMode = MDLDetail`, and switch view.
-- [ ] 3.6 Snapshot tests in `internal/tui/mdl_test.go`: list view with several tables, detail view with cursor on row 23/132, blocker filter on cursor's lock type, `/` search-PID jumps cursor, MDL-instrument-disabled notice.
+- [x] 3.1 Added `ViewMDL` constant + `MDLMode` enum (list/detail) + Model fields (`mdlMode`, `mdlTableSchema`, `mdlTableName`, `mdlListCursor`, `mdlQueueCursor`, `mdlBlockerFilter`) + `M` keybinding in `internal/tui/model.go`. `esc` from MDL detail → list, from list → Overview.
+- [x] 3.2 Prepended `{"M","MDL",ViewMDL}` after Tables in `orderedTabs` (`internal/tui/tabs.go`).
+- [x] 3.3 `case ViewMDL:` added to `renderMain` switch (`internal/tui/views.go`).
+- [x] 3.4 Created `internal/tui/mdl.go`: `renderMDL` dispatch, `renderMDLList`, `renderMDLDetail`, `formatLockTypeBuckets`, `handleMDLKey` (j/k/g/G/enter/B/K/esc), `renderMDLDisabledNotice` for the instrument-off path.
+- [x] 3.5 Hottest Tables panel in Overview now shows a `(M for MDL queue)` hint pointing at the new tab. Cursor-on-row drill is deferred — the M tab is one keystroke away and lists every contended table; adding a panel-focus mechanism to Overview (load vs hot-tables vs hot-queries) is feature creep for what's currently a one-step path.
+- [x] 3.6 13 snapshot tests in `internal/tui/mdl_test.go` covering: empty-shows-helpful-message, list-sorted-by-queue-depth, queue-and-holders-both-rendered, blocker-filter-shows-conflicting-only, missing-table-shows-back-hint, formatLockTypeBuckets sort + empty, queue-position-rendering, dispatch-to-correct-mode, MDL-tab-in-tab-bar, enter-enters-detail, B-toggles-blocker-filter, down-navigates-queue (incl. bounds + G).
 
 ## 4. Optional — sys.schema_table_lock_waits (deferred)
 

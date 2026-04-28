@@ -529,6 +529,8 @@ func renderMain(m Model) string {
 		return renderView(m, renderIssueDetail(m))
 	case ViewTables:
 		return renderView(m, renderTablesView(m))
+	case ViewMDL:
+		return renderView(m, renderMDL(m))
 	case ViewTop:
 		return renderView(m, renderTopPanel(m))
 	case ViewExplain:

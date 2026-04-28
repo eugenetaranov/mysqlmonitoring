@@ -27,6 +27,15 @@ const (
 	ViewHelp
 	ViewTables
 	ViewOverview
+	ViewMDL
+)
+
+// MDLMode picks list vs per-table detail inside the M tab.
+type MDLMode uint8
+
+const (
+	MDLModeList MDLMode = iota
+	MDLModeDetail
 )
 
 // ResultMsg carries a monitor result to the TUI.
@@ -106,6 +115,18 @@ type Model struct {
 	overviewCursor int
 	topUser        string
 	topHost        string
+
+	// MDL view state. mdlMode toggles between the hottest-tables
+	// list and a per-table detail view. mdlTableFilter is the
+	// (schema, name) the detail view focuses on, set either by
+	// drill-down from Overview's Hottest Tables panel or by
+	// pressing enter on a list row.
+	mdlMode          MDLMode
+	mdlTableSchema   string
+	mdlTableName     string
+	mdlListCursor    int // selected row in list mode
+	mdlQueueCursor   int // selected row in detail's QUEUE panel
+	mdlBlockerFilter bool // when true, HOLDERS panel filters to entries that block the QUEUE cursor
 
 	// helpReturn remembers which view to restore when the help
 	// overlay is dismissed.
@@ -313,6 +334,15 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.explainResult = nil
 			m.explainErr = nil
 			return m, nil
+		case ViewMDL:
+			// Detail → list → Overview.
+			if m.mdlMode == MDLModeDetail {
+				m.mdlMode = MDLModeList
+				m.mdlQueueCursor = 0
+				return m, nil
+			}
+			m.view = ViewOverview
+			return m, nil
 		case ViewTop, ViewLock, ViewTables, ViewIssues:
 			m.view = ViewOverview
 			return m, nil
@@ -353,6 +383,11 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "B":
 		m.view = ViewTables
 		return m, nil
+	case "M":
+		m.view = ViewMDL
+		m.mdlMode = MDLModeList
+		m.mdlListCursor = 0
+		return m, nil
 	}
 
 	// View-specific keys.
@@ -367,6 +402,8 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.handleTopKey(key)
 	case ViewTables:
 		return m.handleTablesKey(key)
+	case ViewMDL:
+		return m.handleMDLKey(key)
 	case ViewExplain:
 		return m, nil
 	}

@@ -381,6 +381,7 @@ func renderHottestQueries(m Model, width int) string {
 func renderHottestTables(m Model, width int) string {
 	var b strings.Builder
 	b.WriteString(headerStyle.Render("Hottest tables"))
+	b.WriteString(dimStyle.Render("  (M for MDL queue)"))
 	b.WriteString("\n")
 
 	rows := buildTableRows(m.result.Issues, m.result.Snapshot)
