@@ -37,6 +37,16 @@ type Config struct {
 	NewDigestProtection time.Duration
 }
 
+// queryTimeout caps each individual collector poll's database call.
+// When the deadline fires, go-sql-driver/mysql opens a side connection
+// and issues KILL QUERY on the hung statement so server-side work
+// stops. Without this, a stuck query inside the perf-insights or
+// health loop would only be aborted by the DSN's readTimeout, which
+// closes the socket but leaves the server-side query running — the
+// exact orphan-pileup bug the lock monitor's Snapshot path already
+// avoids in internal/monitor/monitor.go.
+const queryTimeout = 5 * time.Second
+
 // DefaultConfig matches the design.md "M1 lean" profile.
 func DefaultConfig() Config {
 	return Config{
@@ -208,10 +218,22 @@ func (i *Insights) Run(ctx context.Context) {
 	wg.Wait()
 }
 
+// pollWithTimeout runs fn with a fresh per-call deadline derived from
+// ctx. Any in-flight statement is cancelled (and KILLed by the driver)
+// when the deadline fires, so a hung query never leaks past one cycle.
+func pollWithTimeout(ctx context.Context, fn func(context.Context) error) error {
+	c, cancel := context.WithTimeout(ctx, queryTimeout)
+	defer cancel()
+	return fn(c)
+}
+
 func (i *Insights) runHealthLoop(ctx context.Context) {
 	t := time.NewTicker(i.cfg.HealthInterval)
 	defer t.Stop()
-	if _, err := i.Health.Poll(ctx); err != nil {
+	if err := pollWithTimeout(ctx, func(c context.Context) error {
+		_, err := i.Health.Poll(c)
+		return err
+	}); err != nil {
 		i.bumpErr(&i.healthErrors)
 	}
 	for {
@@ -219,7 +241,10 @@ func (i *Insights) runHealthLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			if _, err := i.Health.Poll(ctx); err != nil {
+			if err := pollWithTimeout(ctx, func(c context.Context) error {
+				_, err := i.Health.Poll(c)
+				return err
+			}); err != nil {
 				i.bumpErr(&i.healthErrors)
 			}
 		}
@@ -229,7 +254,10 @@ func (i *Insights) runHealthLoop(ctx context.Context) {
 func (i *Insights) runDigestLoop(ctx context.Context) {
 	t := time.NewTicker(i.cfg.PollInterval)
 	defer t.Stop()
-	if _, err := i.digest.Poll(ctx, time.Now()); err != nil {
+	if err := pollWithTimeout(ctx, func(c context.Context) error {
+		_, err := i.digest.Poll(c, time.Now())
+		return err
+	}); err != nil {
 		i.bumpErr(&i.digestErrors)
 	}
 	for {
@@ -237,7 +265,10 @@ func (i *Insights) runDigestLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case now := <-t.C:
-			if _, err := i.digest.Poll(ctx, now); err != nil {
+			if err := pollWithTimeout(ctx, func(c context.Context) error {
+				_, err := i.digest.Poll(c, now)
+				return err
+			}); err != nil {
 				i.bumpErr(&i.digestErrors)
 			}
 		}
@@ -247,7 +278,10 @@ func (i *Insights) runDigestLoop(ctx context.Context) {
 func (i *Insights) runWaitLoop(ctx context.Context) {
 	t := time.NewTicker(i.cfg.PollInterval)
 	defer t.Stop()
-	if _, err := i.waits.Poll(ctx, time.Now()); err != nil {
+	if err := pollWithTimeout(ctx, func(c context.Context) error {
+		_, err := i.waits.Poll(c, time.Now())
+		return err
+	}); err != nil {
 		i.bumpErr(&i.waitErrors)
 	}
 	for {
@@ -255,7 +289,10 @@ func (i *Insights) runWaitLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case now := <-t.C:
-			if _, err := i.waits.Poll(ctx, now); err != nil {
+			if err := pollWithTimeout(ctx, func(c context.Context) error {
+				_, err := i.waits.Poll(c, now)
+				return err
+			}); err != nil {
 				i.bumpErr(&i.waitErrors)
 			}
 		}
@@ -273,7 +310,9 @@ func (i *Insights) runCPULoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case t := <-sample.C:
-			if err := i.cpu.Sample(ctx, t); err != nil {
+			if err := pollWithTimeout(ctx, func(c context.Context) error {
+				return i.cpu.Sample(c, t)
+			}); err != nil {
 				i.bumpErr(&i.cpuErrors)
 			}
 		case t := <-flush.C:

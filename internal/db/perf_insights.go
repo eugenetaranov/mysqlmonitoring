@@ -74,8 +74,8 @@ type PerfInsightsDB interface {
 // DigestStats returns a snapshot of every digest's totals. Rows with a
 // NULL digest (truncated entries) are skipped.
 func (m *MySQLDB) DigestStats(ctx context.Context) ([]DigestRow, error) {
-	const q = `
-		SELECT
+	q := `
+		SELECT ` + queryTimeoutHint + `
 			COALESCE(SCHEMA_NAME, '') AS schema_name,
 			DIGEST,
 			COALESCE(DIGEST_TEXT, '') AS digest_text,
@@ -116,8 +116,8 @@ func (m *MySQLDB) DigestStats(ctx context.Context) ([]DigestRow, error) {
 // WaitStats returns a snapshot of every wait event's totals. Rows
 // with zero counts are skipped to keep the working set small.
 func (m *MySQLDB) WaitStats(ctx context.Context) ([]WaitRow, error) {
-	const q = `
-		SELECT EVENT_NAME, COUNT_STAR, SUM_TIMER_WAIT
+	q := `
+		SELECT ` + queryTimeoutHint + ` EVENT_NAME, COUNT_STAR, SUM_TIMER_WAIT
 		FROM performance_schema.events_waits_summary_global_by_event_name
 		WHERE COUNT_STAR > 0`
 
@@ -146,8 +146,8 @@ func (m *MySQLDB) WaitStats(ctx context.Context) ([]WaitRow, error) {
 // wait event for the thread so a session blocked on a real wait is
 // not mis-classified as CPU.
 func (m *MySQLDB) CurrentStatements(ctx context.Context) ([]CurrentStmt, error) {
-	const q = `
-		SELECT
+	q := `
+		SELECT ` + queryTimeoutHint + `
 			t.PROCESSLIST_ID,
 			COALESCE(esc.CURRENT_SCHEMA, '') AS schema_name,
 			COALESCE(esc.DIGEST, '')         AS digest,
@@ -205,8 +205,8 @@ func (m *MySQLDB) CurrentStatements(ctx context.Context) ([]CurrentStmt, error) 
 // matches, the returned Example has empty fields and err is nil so
 // callers can decide how to surface "no example".
 func (m *MySQLDB) RecentExample(ctx context.Context, digest string) (Example, error) {
-	const q = `
-		SELECT SQL_TEXT, COALESCE(CURRENT_SCHEMA, '')
+	q := `
+		SELECT ` + queryTimeoutHint + ` SQL_TEXT, COALESCE(CURRENT_SCHEMA, '')
 		FROM performance_schema.events_statements_history_long
 		WHERE DIGEST = ? AND SQL_TEXT IS NOT NULL AND SQL_TEXT <> ''
 		ORDER BY TIMER_END DESC
