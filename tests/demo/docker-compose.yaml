@@ -26,3 +26,39 @@ services:
       - ./workload.py:/workload.py:ro
     command: ["sh", "-c", "pip install --quiet mysql-connector-python && python -u /workload.py"]
     restart: on-failure
+
+  # OLTP baseline. sysbench oltp_read_write generates a steady stream
+  # of mixed SELECT/UPDATE/INSERT/DELETE traffic so the perf-insights
+  # views (DB-load sparkline, AAS by user/host/schema, Top SQL,
+  # Hottest Queries) have something to attribute beyond the bursty
+  # contention scenarios run by the workload service above.
+  #
+  # Tables live in their own `sbtest` database so they don't interfere
+  # with init.sql's accounts/orders schema.
+  #
+  # Opt out at runtime with:
+  #   docker compose -f tests/demo/docker-compose.yaml up -d --scale sysbench=0
+  sysbench:
+    # Alpine + apk add gives us a multi-arch (amd64 + arm64) sysbench
+    # without depending on a third-party image. The runtime install is
+    # cached in the layer once the container is built; on a clean
+    # `make test-up` it adds ~5s to first start.
+    image: alpine:3.20
+    depends_on:
+      mysql:
+        condition: service_healthy
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        apk add --no-cache --quiet sysbench >/dev/null
+        COMMON="--db-driver=mysql --mysql-host=mysql --mysql-port=3306
+                --mysql-user=root --mysql-password=demopass --mysql-db=sbtest"
+        # `sbtest` database is provisioned by init.sql on first boot.
+        # Prepare tables; tolerate "already exists" on restart.
+        sysbench $$COMMON --tables=4 --table-size=10000 oltp_read_write prepare || true
+        # Run forever, summarising every 10s to the container log.
+        exec sysbench $$COMMON --tables=4 --table-size=10000 \
+          --threads=4 --time=0 --report-interval=10 oltp_read_write run
+    restart: on-failure

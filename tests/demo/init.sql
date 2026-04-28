@@ -47,3 +47,18 @@ INSERT INTO orders (id, account_id, status, amount) VALUES
 (18, 9, 'completed',  75.00),
 (19, 10, 'pending',  900.00),
 (20, 10, 'shipped',  450.00);
+
+-- Enable the MDL instrument so the M tab in mysqlmonitoring (and the
+-- ddl_conflict detector's findPotentialBlockers helper) actually have
+-- data to read. Off by default on MySQL 5.7 / 8.0 LTS; on by default
+-- in 8.1+. This is idempotent — runs once on first container boot via
+-- /docker-entrypoint-initdb.d.
+UPDATE performance_schema.setup_instruments
+   SET ENABLED='YES', TIMED='YES'
+ WHERE NAME LIKE 'wait/lock/metadata%';
+
+-- Database for the sysbench oltp_read_write baseline workload. The
+-- sysbench container's prepare step creates tables but won't create
+-- the database itself, and the severalnines/sysbench image doesn't
+-- ship a mysql client to do it from there.
+CREATE DATABASE IF NOT EXISTS sbtest;

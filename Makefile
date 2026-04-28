@@ -89,16 +89,34 @@ release: ## Create and push a release tag
 		echo "Release $(TAG) pushed. GitHub Actions will build and publish artifacts."; \
 	fi
 
-.PHONY: build-all build-linux build-darwin release demo-up demo-down demo
+.PHONY: build-all build-linux build-darwin release test-up test-down test-run demo demo-up demo-down
 
-demo-up: ## Start demo MySQL + workload generators
+# DSN used by test-run / demo when pointing the local binary at the
+# docker-compose stack. Override with `make test-run DSN=...` if you
+# want to point at a different host.
+DEMO_DSN ?= root:demopass@tcp(localhost:13306)/demodb
+
+# Default args passed to the binary in test-run / demo. Override on
+# the command line with `make test-run ARGS="--interval 1"` to add
+# or replace flags without editing the Makefile.
+DEMO_ARGS ?= monitor --enable-perf-insights --dsn "$(DEMO_DSN)"
+
+test-up: ## Start the local MySQL + workload + sysbench OLTP stack
 	docker compose -f tests/demo/docker-compose.yaml up -d
 	@echo "Waiting for MySQL to be ready..."
 	@until docker compose -f tests/demo/docker-compose.yaml exec -T mysql mysqladmin ping -uroot -pdemopass --silent 2>/dev/null; do sleep 1; done
-	@echo "Demo environment is ready (localhost:13306)"
+	@echo "Stack is ready (localhost:13306)"
 
-demo-down: ## Stop demo environment
+test-down: ## Stop the local stack and remove its volumes
 	docker compose -f tests/demo/docker-compose.yaml down -v
 
-demo: build demo-up ## Build and run monitor against demo environment
-	@exec ./bin/mysqlmonitoring monitor --dsn "root:demopass@tcp(localhost:13306)/demodb"
+test-run: build ## Build and run the binary against an already-running stack
+	@exec ./bin/$(BINARY) $(DEMO_ARGS) $(ARGS)
+
+demo: test-up test-run ## All-in-one: bring up the stack and run the binary
+
+# Backward-compatibility aliases — pre-existing target names. Keep so
+# muscle memory and external scripts that call `make demo-up` continue
+# to work.
+demo-up: test-up
+demo-down: test-down

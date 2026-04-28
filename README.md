@@ -238,12 +238,44 @@ When neither is present, the digest is tagged `unknown`.
 
 ## Demo
 
-Requires Docker. Starts MySQL + workload generators that create lock contention and deadlocks.
+Requires Docker. The `tests/demo/` stack runs MySQL 8.0 plus two
+workload generators side-by-side:
+
+- A **Python contention runner** that loops through long
+  transactions, row-lock contention, lock chains, multi-blocker
+  fan-outs, DDL/MDL conflicts, and deadlocks — guaranteeing the
+  Issues, Lock, and MDL tabs always have something to show.
+- **sysbench `oltp_read_write`** running steady mixed traffic on a
+  separate `sbtest` database — gives the Overview's AAS sparkline,
+  Top SQL panel, and load-attribution panels constant baseline
+  traffic to attribute. Opt out with
+  `docker compose -f tests/demo/docker-compose.yaml up -d --scale sysbench=0`.
+
+The MDL instrument (`wait/lock/metadata/sql/mdl`) is enabled
+automatically by `init.sql` so the **M** tab works out of the box.
+
+Three Make targets, used independently:
 
 ```bash
-make demo           # build + start demo + launch monitor
-make demo-down      # stop demo environment
+make test-up        # start MySQL + workload + sysbench
+make test-run       # build + run the local binary against the running stack
+make test-down      # stop and clean up
 ```
+
+Use `test-up` once and `test-run` repeatedly while iterating on the
+code — the binary rebuilds in seconds and reconnects without
+restarting MySQL.
+
+`make demo` is a single-command shortcut for `test-up` + `test-run`.
+
+Pass extra flags through with `ARGS=`:
+
+```bash
+make test-run ARGS="--interval 1"
+```
+
+The `make demo-up` and `make demo-down` aliases continue to work
+for backward compatibility.
 
 ## TUI Controls
 
