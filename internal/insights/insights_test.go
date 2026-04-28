@@ -63,6 +63,14 @@ func (s *stubSource) ProbeCapabilities(_ context.Context) (db.PerfCapabilities, 
 	return s.caps, nil
 }
 
+func (s *stubSource) ProbeReplica(_ context.Context) (db.ReplicaProbe, error) {
+	return db.ReplicaProbe{Role: db.ReplicaRoleStandalone, Dialect: db.ReplicaDialectReplica}, nil
+}
+
+func (s *stubSource) HealthVitals(_ context.Context, _ db.ReplicaProbe, priorAborted uint64) (db.HealthVitals, error) {
+	return db.HealthVitals{Time: time.Now()}, nil
+}
+
 func TestInsights_NewSizesBuffersFromWindow(t *testing.T) {
 	cfg := Config{PollInterval: 10 * time.Second, Window: 1 * time.Hour}
 	i := New(cfg, &stubSource{})
@@ -90,24 +98,29 @@ func TestInsights_ProbeWritesWarnings(t *testing.T) {
 }
 
 func TestInsights_RunRespectsCapabilityFlags(t *testing.T) {
-	// Both subsystems off → Run returns immediately.
+	// Both perf subsystems off → digest/wait/cpu loops do not start.
+	// The health loop is independent of perf_schema and always runs,
+	// so Run terminates only when ctx cancels.
 	src := &stubSource{caps: db.PerfCapabilities{}}
 	i := New(Config{
 		PollInterval:      50 * time.Millisecond,
 		CPUSampleInterval: 25 * time.Millisecond,
+		HealthInterval:    25 * time.Millisecond,
 		Window:            time.Second,
 	}, src)
 	require.NoError(t, i.Probe(context.Background(), nil))
 
-	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
 
 	done := make(chan struct{})
 	go func() { i.Run(ctx); close(done) }()
 	select {
 	case <-done:
-		// good — no goroutines were started
-	case <-time.After(150 * time.Millisecond):
-		t.Fatal("Run blocked despite no enabled capabilities")
+		// good — Run unblocked after ctx cancellation
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("Run did not terminate after ctx cancel")
 	}
+	// Health collector should have polled at least once.
+	assert.GreaterOrEqual(t, i.Health.Latest().Time.Unix(), int64(0))
 }

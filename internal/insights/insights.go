@@ -19,6 +19,11 @@ type Config struct {
 	// CPUSampleInterval is how often events_statements_current is
 	// sampled to estimate the CPU class. Should be <= PollInterval.
 	CPUSampleInterval time.Duration
+	// HealthInterval is how often SHOW GLOBAL STATUS / SHOW REPLICA
+	// STATUS are polled for the Overview vitals. The cost is two
+	// in-memory lookups per poll on the server side — well below
+	// noise — so the default cadence is fast (5s).
+	HealthInterval time.Duration
 	// Window is the in-memory retention horizon. The sample capacity
 	// is sized so that a fully populated buffer covers Window.
 	Window time.Duration
@@ -37,6 +42,7 @@ func DefaultConfig() Config {
 	return Config{
 		PollInterval:        10 * time.Second,
 		CPUSampleInterval:   1 * time.Second,
+		HealthInterval:      5 * time.Second,
 		Window:              1 * time.Hour,
 		MaxDigests:          2000,
 		SessionCapacity:     8192,
@@ -44,15 +50,23 @@ func DefaultConfig() Config {
 	}
 }
 
+// Source is the database surface Insights depends on. MySQLDB
+// implements both halves; tests can fake either independently.
+type Source interface {
+	db.PerfInsightsDB
+	collector.HealthSource
+}
+
 // Insights holds all the in-memory series for the perf-insights
 // subsystem and runs the collectors that feed them.
 type Insights struct {
 	cfg Config
-	src db.PerfInsightsDB
+	src Source
 
 	Registry *series.Registry
 	Waits    *collector.WaitSeries
 	Sessions *series.RingSink[series.SessionSample]
+	Health   *collector.HealthCollector
 
 	digest *collector.DigestCollector
 	waits  *collector.WaitCollector
@@ -64,17 +78,21 @@ type Insights struct {
 	digestErrors uint64
 	waitErrors   uint64
 	cpuErrors    uint64
+	healthErrors uint64
 }
 
 // New constructs an Insights with cfg and source. The series and
 // collectors are initialised eagerly so callers can read empty
 // buffers before Run is invoked.
-func New(cfg Config, src db.PerfInsightsDB) *Insights {
+func New(cfg Config, src Source) *Insights {
 	if cfg.PollInterval <= 0 {
 		cfg.PollInterval = DefaultConfig().PollInterval
 	}
 	if cfg.CPUSampleInterval <= 0 {
 		cfg.CPUSampleInterval = DefaultConfig().CPUSampleInterval
+	}
+	if cfg.HealthInterval <= 0 {
+		cfg.HealthInterval = DefaultConfig().HealthInterval
 	}
 	if cfg.Window <= 0 {
 		cfg.Window = DefaultConfig().Window
@@ -103,9 +121,10 @@ func New(cfg Config, src db.PerfInsightsDB) *Insights {
 		Registry: registry,
 		Waits:    waits,
 		Sessions: sessions,
+		Health:   collector.NewHealthCollector(src),
 		digest:   collector.NewDigestCollector(src, registry),
-		waits: collector.NewWaitCollector(src, waits),
-		cpu: collector.NewCPUSampler(src, waits, sessions, time.Now()),
+		waits:    collector.NewWaitCollector(src, waits),
+		cpu:      collector.NewCPUSampler(src, waits, sessions, time.Now()),
 	}
 }
 
@@ -177,7 +196,34 @@ func (i *Insights) Run(ctx context.Context) {
 		}()
 	}
 
+	// Health collection is independent of perf_schema availability —
+	// the cherry-pick of SHOW GLOBAL STATUS works on any MySQL/MariaDB
+	// install — so we always run it.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		i.runHealthLoop(ctx)
+	}()
+
 	wg.Wait()
+}
+
+func (i *Insights) runHealthLoop(ctx context.Context) {
+	t := time.NewTicker(i.cfg.HealthInterval)
+	defer t.Stop()
+	if _, err := i.Health.Poll(ctx); err != nil {
+		i.bumpErr(&i.healthErrors)
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			if _, err := i.Health.Poll(ctx); err != nil {
+				i.bumpErr(&i.healthErrors)
+			}
+		}
+	}
 }
 
 func (i *Insights) runDigestLoop(ctx context.Context) {
@@ -247,10 +293,16 @@ type ErrorCounts struct {
 	Digest uint64
 	Wait   uint64
 	CPU    uint64
+	Health uint64
 }
 
 func (i *Insights) ErrorCounts() ErrorCounts {
 	i.mu.Lock()
 	defer i.mu.Unlock()
-	return ErrorCounts{Digest: i.digestErrors, Wait: i.waitErrors, CPU: i.cpuErrors}
+	return ErrorCounts{
+		Digest: i.digestErrors,
+		Wait:   i.waitErrors,
+		CPU:    i.cpuErrors,
+		Health: i.healthErrors,
+	}
 }

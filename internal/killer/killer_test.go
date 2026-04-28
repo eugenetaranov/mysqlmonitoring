@@ -33,6 +33,12 @@ func (m *mockDB) KillConnection(ctx context.Context, id uint64) error {
 }
 func (m *mockDB) ConnectionID(ctx context.Context) (uint64, error) { return m.connID, nil }
 func (m *mockDB) Close() error                                     { return nil }
+func (m *mockDB) HealthVitals(_ context.Context, _ db.ReplicaProbe, _ uint64) (db.HealthVitals, error) {
+	return db.HealthVitals{}, nil
+}
+func (m *mockDB) ProbeReplica(_ context.Context) (db.ReplicaProbe, error) {
+	return db.ReplicaProbe{}, nil
+}
 
 func TestKillSuccess(t *testing.T) {
 	mock := &mockDB{

@@ -56,6 +56,14 @@ func (m *mockDB) Close() error {
 	return nil
 }
 
+func (m *mockDB) HealthVitals(_ context.Context, _ db.ReplicaProbe, _ uint64) (db.HealthVitals, error) {
+	return db.HealthVitals{}, nil
+}
+
+func (m *mockDB) ProbeReplica(_ context.Context) (db.ReplicaProbe, error) {
+	return db.ReplicaProbe{}, nil
+}
+
 func TestMonitorSnapshot(t *testing.T) {
 	now := time.Now()
 	mock := &mockDB{

@@ -38,6 +38,8 @@ TRANSACTIONS
 ------------
 Trx id counter 12350
 Purge done for trx's n:o < 12300 undo n:o < 0 state: running
+History list length 42
+LIST OF TRANSACTIONS FOR EACH SESSION:
 ---TRANSACTION 12349, ACTIVE 10 sec
 2 lock struct(s), heap size 1136, 1 row lock(s)
 MySQL thread id 102, OS thread handle 0x7f1234, query id 505 localhost root
@@ -78,6 +80,40 @@ func TestParseDeadlockSection(t *testing.T) {
 	assert.Equal(t, "testdb.orders", trx2.TableName)
 	assert.Equal(t, "root", trx2.User)
 	assert.Equal(t, "UPDATE orders SET status='done' WHERE user_id=1", trx2.Query)
+}
+
+func TestParseHistoryListLength(t *testing.T) {
+	result := ParseInnoDBStatus(sampleInnoDBStatus)
+	assert.Equal(t, uint64(42), result.HistoryListLength)
+}
+
+func TestParseHistoryListLength_Absent(t *testing.T) {
+	raw := `
+=====================================
+INNODB MONITOR OUTPUT
+=====================================
+------------
+TRANSACTIONS
+------------
+Trx id counter 100
+--------
+FILE I/O
+--------
+`
+	result := ParseInnoDBStatus(raw)
+	assert.Equal(t, uint64(0), result.HistoryListLength)
+}
+
+func TestParseHistoryListLength_LargeValue(t *testing.T) {
+	raw := `
+------------
+TRANSACTIONS
+------------
+Trx id counter 99999
+History list length 18446744073709551
+`
+	result := ParseInnoDBStatus(raw)
+	assert.Equal(t, uint64(18446744073709551), result.HistoryListLength)
 }
 
 func TestParseInnoDBStatusNoDeadlock(t *testing.T) {

@@ -12,8 +12,23 @@ func ParseInnoDBStatus(raw string) InnoDBStatus {
 
 	result.LatestDeadlock = parseDeadlockSection(raw)
 	result.TransactionCount, result.ActiveTrxCount, result.LockWaitCount = parseTransactionCounts(raw)
+	result.HistoryListLength = parseHistoryListLength(raw)
 
 	return result
+}
+
+// historyListLengthRe matches the line "History list length 12345" in
+// the TRANSACTIONS section. The value is the count of undo log entries
+// awaiting purge — a leading indicator of long-running transactions.
+var historyListLengthRe = regexp.MustCompile(`(?m)^History list length\s+(\d+)`)
+
+func parseHistoryListLength(raw string) uint64 {
+	m := historyListLengthRe.FindStringSubmatch(raw)
+	if m == nil {
+		return 0
+	}
+	v, _ := strconv.ParseUint(m[1], 10, 64)
+	return v
 }
 
 // sectionRe matches section headers like:

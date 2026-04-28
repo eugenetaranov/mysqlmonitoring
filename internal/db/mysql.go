@@ -367,3 +367,181 @@ func (m *MySQLDB) KillConnection(ctx context.Context, id uint64) error {
 	}
 	return err
 }
+
+// healthVitalNames are the SHOW GLOBAL STATUS variable names we pull
+// every health-collector poll. Pulled together in a single WHERE-IN
+// query so the cost is one round-trip per poll.
+var healthVitalNames = []string{
+	"Threads_running",
+	"Threads_connected",
+	"Innodb_buffer_pool_pages_dirty",
+	"Innodb_buffer_pool_pages_total",
+	"Innodb_buffer_pool_read_requests",
+	"Innodb_buffer_pool_reads",
+	"Aborted_clients",
+}
+
+// HealthVitals reads the cheap "is the DB OK?" gauges from
+// SHOW GLOBAL STATUS plus, when probe.Role is ReplicaRoleReplica,
+// the relevant SHOW REPLICA STATUS / SHOW SLAVE STATUS row.
+//
+// AbortedClientsDelta requires the caller to provide the prior
+// snapshot's AbortedClients raw counter via priorAborted. On a
+// counter reset (server restart) the delta is reported as 0 so a
+// reset doesn't masquerade as an enormous spike.
+func (m *MySQLDB) HealthVitals(ctx context.Context, probe ReplicaProbe, priorAborted uint64) (HealthVitals, error) {
+	v := HealthVitals{Time: time.Now()}
+
+	// One placeholder per name so the prepared form stays simple even
+	// with interpolateParams=true on the DSN.
+	placeholders := strings.TrimRight(strings.Repeat("?,", len(healthVitalNames)), ",")
+	q := "SHOW GLOBAL STATUS WHERE Variable_name IN (" + placeholders + ")"
+	args := make([]any, 0, len(healthVitalNames))
+	for _, n := range healthVitalNames {
+		args = append(args, n)
+	}
+
+	rows, err := m.queryWithRetry(ctx, q, args...)
+	if err != nil {
+		return v, fmt.Errorf("health vitals: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var name, value string
+		if err := rows.Scan(&name, &value); err != nil {
+			return v, fmt.Errorf("scan health vital: %w", err)
+		}
+		n, _ := strconv.ParseUint(value, 10, 64)
+		switch name {
+		case "Threads_running":
+			v.ThreadsRunning = n
+		case "Threads_connected":
+			v.ThreadsConnected = n
+		case "Innodb_buffer_pool_pages_dirty":
+			v.InnoDBBufferPoolPagesDirty = n
+		case "Innodb_buffer_pool_pages_total":
+			v.InnoDBBufferPoolPagesTotal = n
+		case "Innodb_buffer_pool_read_requests":
+			v.InnoDBBufferPoolReadRequests = n
+		case "Innodb_buffer_pool_reads":
+			v.InnoDBBufferPoolReads = n
+		case "Aborted_clients":
+			v.AbortedClients = n
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return v, fmt.Errorf("health vitals rows: %w", err)
+	}
+
+	if v.AbortedClients >= priorAborted {
+		v.AbortedClientsDelta = v.AbortedClients - priorAborted
+	}
+
+	if probe.Role == ReplicaRoleReplica {
+		rs, err := m.replicaStatus(ctx, probe.Dialect)
+		if err == nil {
+			v.Replica = rs
+		}
+		// Errors on replica-status are non-fatal; the rest of the
+		// vitals snapshot is still useful.
+	}
+
+	return v, nil
+}
+
+// ProbeReplica detects whether the server has at least one replica
+// channel and which dialect to use. Empty result → standalone.
+//
+// MySQL 8.0.22+ accepts both SHOW REPLICA STATUS and SHOW SLAVE STATUS;
+// older MySQL and MariaDB only accept SHOW SLAVE STATUS. We try the
+// modern one first and fall back on syntax errors.
+func (m *MySQLDB) ProbeReplica(ctx context.Context) (ReplicaProbe, error) {
+	for _, dialect := range []ReplicaDialect{ReplicaDialectReplica, ReplicaDialectSlave} {
+		query := "SHOW REPLICA STATUS"
+		if dialect == ReplicaDialectSlave {
+			query = "SHOW SLAVE STATUS"
+		}
+		rows, err := m.db.QueryContext(ctx, query)
+		if err != nil {
+			// Syntax / privilege errors → try the other dialect.
+			continue
+		}
+		hasRow := rows.Next()
+		// Drain to avoid leaving a connection mid-result.
+		_ = rows.Close()
+		if hasRow {
+			return ReplicaProbe{Role: ReplicaRoleReplica, Dialect: dialect}, nil
+		}
+		// Dialect parsed but no replica rows → standalone, but we still
+		// know which dialect this server speaks.
+		return ReplicaProbe{Role: ReplicaRoleStandalone, Dialect: dialect}, nil
+	}
+	return ReplicaProbe{Role: ReplicaRoleStandalone, Dialect: ReplicaDialectUnknown}, nil
+}
+
+// replicaStatus pulls the subset of SHOW REPLICA STATUS / SHOW SLAVE
+// STATUS columns the Overview surfaces. Column count varies between
+// versions, so we scan into a generic []sql.RawBytes and pick by name.
+func (m *MySQLDB) replicaStatus(ctx context.Context, dialect ReplicaDialect) (*ReplicaStatus, error) {
+	query := "SHOW REPLICA STATUS"
+	if dialect == ReplicaDialectSlave {
+		query = "SHOW SLAVE STATUS"
+	}
+	rows, err := m.queryWithRetry(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	cols, err := rows.Columns()
+	if err != nil {
+		return nil, err
+	}
+	if !rows.Next() {
+		return nil, nil
+	}
+
+	raw := make([]sql.RawBytes, len(cols))
+	scanArgs := make([]any, len(cols))
+	for i := range raw {
+		scanArgs[i] = &raw[i]
+	}
+	if err := rows.Scan(scanArgs...); err != nil {
+		return nil, err
+	}
+
+	byName := make(map[string]string, len(cols))
+	for i, c := range cols {
+		byName[c] = string(raw[i])
+	}
+
+	rs := &ReplicaStatus{
+		SecondsBehindSource: -1,
+	}
+	rs.SourceHost = pickReplicaCol(byName, "Source_Host", "Master_Host")
+	rs.Channel = pickReplicaCol(byName, "Channel_Name")
+	rs.IOThreadRunning = strings.EqualFold(pickReplicaCol(byName, "Replica_IO_Running", "Slave_IO_Running"), "Yes")
+	rs.SQLThreadRunning = strings.EqualFold(pickReplicaCol(byName, "Replica_SQL_Running", "Slave_SQL_Running"), "Yes")
+	if v := pickReplicaCol(byName, "Seconds_Behind_Source", "Seconds_Behind_Master"); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
+			rs.SecondsBehindSource = n
+		}
+	}
+	rs.GTIDExecuted = pickReplicaCol(byName, "Executed_Gtid_Set")
+	rs.GTIDPurged = pickReplicaCol(byName, "Retrieved_Gtid_Set")
+	rs.LastError = pickReplicaCol(byName, "Last_Error", "Last_SQL_Error")
+	return rs, nil
+}
+
+// pickReplicaCol returns the first non-empty column value from names,
+// allowing us to support both Replica_/Source_ (8.0.22+) and Slave_/
+// Master_ (everything else) without two queries.
+func pickReplicaCol(byName map[string]string, names ...string) string {
+	for _, n := range names {
+		if v, ok := byName[n]; ok && v != "" {
+			return v
+		}
+	}
+	return ""
+}

@@ -8,12 +8,12 @@
 
 ## 2. Health-vitals plumbing
 
-- [ ] 2.1 Add `HistoryListLength uint64` to `db.InnoDBStatus`; parse in `internal/db/innodb_status_parser.go` with regex `(?m)^History list length\s+(\d+)`. Tests with sample fixtures (steady state, idle DB, high-HLL DB).
-- [ ] 2.2 Add `db.HealthVitals` struct (Threads_running, Threads_connected, dirty pages, total pages, aborted_clients delta, optional Replica) and `HealthVitals(ctx)` interface method on `DB`. Implement on `MySQLDB.HealthVitals(ctx)` using one `SHOW GLOBAL STATUS WHERE Variable_name IN (…)` query plus optional `SHOW REPLICA STATUS` / `SHOW SLAVE STATUS`. Wire through existing `queryWithRetry` / per-query timeout helpers.
-- [ ] 2.3 Extend `Insights.Probe` (or its capability struct) to detect replica role once and cache the result; record which replica-status syntax to use.
-- [ ] 2.4 New `internal/collector/health.go` mirroring `digest.go` shape: `HealthCollector`, `Poll(ctx)`, public `Latest() HealthSnapshot`. Holds the prior `Aborted_clients` for delta computation.
-- [ ] 2.5 Wire `runHealthLoop` into `internal/insights/insights.go`; add `HealthInterval` (default 5s) to `Insights.Config`.
-- [ ] 2.6 Unit tests: HLL regex, delta math under counter resets, replica vs standalone Probe behaviour, missing buffer-pool variables on Aurora.
+- [x] 2.1 Add `HistoryListLength uint64` to `db.InnoDBStatus`; parse in `internal/db/innodb_status_parser.go` with regex `(?m)^History list length\s+(\d+)`. Tests with sample fixtures (steady state, idle DB, high-HLL DB).
+- [x] 2.2 Add `db.HealthVitals` struct (Threads_running, Threads_connected, dirty pages, total pages, aborted_clients delta, optional Replica) and `HealthVitals(ctx)` interface method on `DB`. Implement on `MySQLDB.HealthVitals(ctx)` using one `SHOW GLOBAL STATUS WHERE Variable_name IN (…)` query plus optional `SHOW REPLICA STATUS` / `SHOW SLAVE STATUS`. Wire through existing `queryWithRetry` / per-query timeout helpers.
+- [x] 2.3 New `MySQLDB.ProbeReplica(ctx)` detects replica role and dialect once at startup; cached by the HealthCollector for the process lifetime.
+- [x] 2.4 New `internal/collector/health.go` mirroring `digest.go` shape: `HealthCollector`, `Poll(ctx)`, public `Latest() HealthVitals` and `ReplicaProbe()`. Holds the prior `Aborted_clients` for delta computation.
+- [x] 2.5 Wire `runHealthLoop` into `internal/insights/insights.go`; add `HealthInterval` (default 5s) to `Insights.Config`. Health loop runs unconditionally — independent of perf_schema availability.
+- [x] 2.6 Unit tests: HLL regex (steady, absent, large value), delta math across polls, counter-reset clamps to 0, probe-only-once, probe-failure retries next poll, error leaves cache intact, probe propagated to vitals call.
 
 ## 3. Overview view
 
