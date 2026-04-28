@@ -38,6 +38,8 @@ type CurrentStmt struct {
 	Executing     bool   // events_statements_current is in-progress
 	CurrentWait   string // empty / "idle" means CPU-eligible
 	ProgramName   string // session_connect_attrs program_name
+	User          string // performance_schema.threads.processlist_user
+	Host          string // performance_schema.threads.processlist_host
 }
 
 // Example is a recent statement instance recovered from
@@ -166,7 +168,9 @@ func (m *MySQLDB) CurrentStatements(ctx context.Context) ([]CurrentStmt, error) 
 				WHERE PROCESSLIST_ID = t.PROCESSLIST_ID
 				  AND ATTR_NAME = 'program_name'
 				LIMIT 1
-			), '')                           AS program_name
+			), '')                           AS program_name,
+			COALESCE(t.PROCESSLIST_USER, '') AS processlist_user,
+			COALESCE(t.PROCESSLIST_HOST, '') AS processlist_host
 		FROM performance_schema.threads t
 		LEFT JOIN performance_schema.events_statements_current esc
 		       ON esc.THREAD_ID = t.THREAD_ID
@@ -186,6 +190,7 @@ func (m *MySQLDB) CurrentStatements(ctx context.Context) ([]CurrentStmt, error) 
 		if err := rows.Scan(
 			&c.ProcesslistID, &c.Schema, &c.Digest, &c.SQLText,
 			&executing, &c.CurrentWait, &c.ProgramName,
+			&c.User, &c.Host,
 		); err != nil {
 			return nil, fmt.Errorf("scan current statement: %w", err)
 		}

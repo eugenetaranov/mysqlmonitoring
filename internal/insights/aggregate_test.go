@@ -93,3 +93,119 @@ func TestLoad_PerClassAAS(t *testing.T) {
 func digestID(i int) string {
 	return string(rune('a'+i)) + "-digest"
 }
+
+func TestLoadByGroup_Empty(t *testing.T) {
+	sessions := series.NewRingSink[series.SessionSample](8)
+	got := LoadByGroup(sessions, time.Now(), time.Minute, GroupKeyUser)
+	assert.Empty(t, got)
+}
+
+func TestLoadByGroup_NilSessionsSafe(t *testing.T) {
+	got := LoadByGroup(nil, time.Now(), time.Minute, GroupKeyUser)
+	assert.Nil(t, got)
+}
+
+func TestLoadByGroup_SingleDominantGroup(t *testing.T) {
+	sessions := series.NewRingSink[series.SessionSample](32)
+	now := time.Now()
+	// Three ticks; same user holds two executing sessions on each tick.
+	for i := 0; i < 3; i++ {
+		tick := now.Add(time.Duration(-i) * time.Second)
+		sessions.Append(series.SessionSample{Time: tick, User: "app_rw", Executing: true})
+		sessions.Append(series.SessionSample{Time: tick, User: "app_rw", Executing: true})
+	}
+
+	got := LoadByGroup(sessions, now, time.Minute, GroupKeyUser)
+	require.Len(t, got, 1)
+	assert.Equal(t, "app_rw", got[0].Group)
+	// 6 obs over 3 ticks = AAS 2.0.
+	assert.InDelta(t, 2.0, got[0].AAS, 0.001)
+	assert.Equal(t, uint64(6), got[0].Observations)
+}
+
+func TestLoadByGroup_ManyGroupsSortedByAAS(t *testing.T) {
+	sessions := series.NewRingSink[series.SessionSample](64)
+	now := time.Now()
+	// 4 ticks total. Distribute executing sessions:
+	// app_rw : 4 obs (1 per tick)         → AAS 1.0
+	// reports: 2 obs (across 2 ticks)     → AAS 0.5
+	// app_ro : 1 obs (1 tick)             → AAS 0.25
+	for i := 0; i < 4; i++ {
+		tick := now.Add(time.Duration(-i) * time.Second)
+		sessions.Append(series.SessionSample{Time: tick, User: "app_rw", Executing: true})
+	}
+	for i := 0; i < 2; i++ {
+		tick := now.Add(time.Duration(-i) * time.Second)
+		sessions.Append(series.SessionSample{Time: tick, User: "reports", Executing: true})
+	}
+	sessions.Append(series.SessionSample{Time: now, User: "app_ro", Executing: true})
+
+	got := LoadByGroup(sessions, now, time.Minute, GroupKeyUser)
+	require.Len(t, got, 3)
+	assert.Equal(t, "app_rw", got[0].Group)
+	assert.Equal(t, "reports", got[1].Group)
+	assert.Equal(t, "app_ro", got[2].Group)
+	assert.InDelta(t, 1.0, got[0].AAS, 0.001)
+	assert.InDelta(t, 0.5, got[1].AAS, 0.001)
+	assert.InDelta(t, 0.25, got[2].AAS, 0.001)
+}
+
+func TestLoadByGroup_SumEqualsTotalAAS(t *testing.T) {
+	sessions := series.NewRingSink[series.SessionSample](64)
+	now := time.Now()
+	for i := 0; i < 5; i++ {
+		tick := now.Add(time.Duration(-i) * time.Second)
+		sessions.Append(series.SessionSample{Time: tick, User: "u1", Executing: true})
+		sessions.Append(series.SessionSample{Time: tick, User: "u2", Executing: true})
+		sessions.Append(series.SessionSample{Time: tick, User: "u3", Executing: true})
+	}
+	got := LoadByGroup(sessions, now, time.Minute, GroupKeyUser)
+	var sum float64
+	for _, g := range got {
+		sum += g.AAS
+	}
+	// 15 obs / 5 ticks = AAS 3.0 total.
+	assert.InDelta(t, 3.0, sum, 0.001)
+}
+
+func TestLoadByGroup_UnknownBucket(t *testing.T) {
+	sessions := series.NewRingSink[series.SessionSample](16)
+	now := time.Now()
+	// System / replication thread with NULL user surfaces as "(unknown)".
+	sessions.Append(series.SessionSample{Time: now, User: "", Executing: true})
+	sessions.Append(series.SessionSample{Time: now, User: "app_rw", Executing: true})
+
+	got := LoadByGroup(sessions, now, time.Minute, GroupKeyUser)
+	require.Len(t, got, 2)
+	groups := map[string]bool{got[0].Group: true, got[1].Group: true}
+	assert.True(t, groups["(unknown)"])
+	assert.True(t, groups["app_rw"])
+}
+
+func TestLoadByGroup_GroupByHostAndSchema(t *testing.T) {
+	sessions := series.NewRingSink[series.SessionSample](32)
+	now := time.Now()
+	sessions.Append(series.SessionSample{Time: now, Host: "10.0.4.12", Schema: "shop", Executing: true})
+	sessions.Append(series.SessionSample{Time: now, Host: "10.0.4.12", Schema: "shop", Executing: true})
+	sessions.Append(series.SessionSample{Time: now, Host: "10.0.4.13", Schema: "auth", Executing: true})
+
+	byHost := LoadByGroup(sessions, now, time.Minute, GroupKeyHost)
+	require.Len(t, byHost, 2)
+	assert.Equal(t, "10.0.4.12", byHost[0].Group)
+	assert.Equal(t, uint64(2), byHost[0].Observations)
+
+	bySchema := LoadByGroup(sessions, now, time.Minute, GroupKeySchema)
+	require.Len(t, bySchema, 2)
+	assert.Equal(t, "shop", bySchema[0].Group)
+	assert.Equal(t, uint64(2), bySchema[0].Observations)
+}
+
+func TestLoadByGroup_NonExecutingNotCounted(t *testing.T) {
+	sessions := series.NewRingSink[series.SessionSample](16)
+	now := time.Now()
+	// Tick exists (so ticks=1) but no executing sessions.
+	sessions.Append(series.SessionSample{Time: now, User: "app_rw", Executing: false})
+
+	got := LoadByGroup(sessions, now, time.Minute, GroupKeyUser)
+	assert.Empty(t, got)
+}

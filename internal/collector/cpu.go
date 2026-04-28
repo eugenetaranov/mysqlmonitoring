@@ -64,6 +64,8 @@ func (s *CPUSampler) Sample(ctx context.Context, sampleTime time.Time) error {
 				Digest:        st.Digest,
 				Schema:        st.Schema,
 				AppTag:        ResolveAppTag(st),
+				User:          st.User,
+				Host:          st.Host,
 				EventName:     st.CurrentWait,
 				Executing:     true,
 			})

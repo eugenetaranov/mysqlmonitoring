@@ -175,6 +175,93 @@ func sortSummaries(s []DigestSummary, key SortKey) {
 	}
 }
 
+// GroupKey selects the dimension by which LoadByGroup attributes
+// load. Each session sample contributes to exactly one group.
+type GroupKey int
+
+const (
+	GroupKeyUser GroupKey = iota
+	GroupKeyHost
+	GroupKeySchema
+)
+
+// GroupLoad is one row in a load-by-group breakdown.
+//
+// AAS is computed as observation-count / tick-count, where one
+// observation is one Executing session seen at one sampler tick.
+// This is symmetric with how the global CPU class is computed in
+// collector.CPUSampler — i.e. AAS expressed as "average concurrent
+// active sessions for this group, over the window".
+type GroupLoad struct {
+	Group string
+	AAS   float64
+	// Observations is the raw session-tick count (sum across all
+	// ticks in the window of executing sessions belonging to Group).
+	// Useful for ranking even when the window has zero ticks.
+	Observations uint64
+}
+
+// LoadByGroup attributes the executing-session load over the window
+// to groups identified by key. Output is sorted by AAS descending.
+//
+// The function operates purely in-memory over the existing
+// SessionSample sink; it never touches the database. Sessions whose
+// group value is empty (e.g. system threads with NULL processlist
+// user) are bucketed under "(unknown)" so the totals reconcile.
+func LoadByGroup(sessions *series.RingSink[series.SessionSample], now time.Time, window time.Duration, key GroupKey) []GroupLoad {
+	if window <= 0 {
+		window = time.Hour
+	}
+	if sessions == nil {
+		return nil
+	}
+
+	obs := make(map[string]uint64)
+	ticks := make(map[time.Time]struct{})
+	for s := range sessions.Range(now, window) {
+		ticks[s.Time] = struct{}{}
+		if !s.Executing {
+			continue
+		}
+		obs[groupValue(s, key)]++
+	}
+
+	tickCount := uint64(len(ticks))
+	out := make([]GroupLoad, 0, len(obs))
+	for g, n := range obs {
+		gl := GroupLoad{Group: g, Observations: n}
+		if tickCount > 0 {
+			gl.AAS = float64(n) / float64(tickCount)
+		}
+		out = append(out, gl)
+	}
+
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].AAS != out[j].AAS {
+			return out[i].AAS > out[j].AAS
+		}
+		// Stable tiebreak on Group name so test output is deterministic.
+		return out[i].Group < out[j].Group
+	})
+	return out
+}
+
+func groupValue(s series.SessionSample, key GroupKey) string {
+	var v string
+	switch key {
+	case GroupKeyHost:
+		v = s.Host
+	case GroupKeySchema:
+		v = s.Schema
+	default:
+		v = s.User
+	}
+	if v == "" {
+		return "(unknown)"
+	}
+	return v
+}
+
 // ClassLoad is one wait-class entry in the LoadBreakdown.
 type ClassLoad struct {
 	Class series.WaitClass

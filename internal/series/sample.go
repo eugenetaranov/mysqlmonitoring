@@ -100,6 +100,8 @@ type SessionSample struct {
 	Digest        string
 	Schema        string
 	AppTag        string
+	User          string // performance_schema.threads.processlist_user
+	Host          string // performance_schema.threads.processlist_host
 	EventName     string // empty if no current wait (CPU candidate)
 	Executing     bool   // session is actively running a statement
 }
