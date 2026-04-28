@@ -150,12 +150,22 @@ func (q MDLQueue) PositionOf(pid uint64) (rank, total int, ok bool) {
 // authoritative answers the Phase-4 sys.schema_table_lock_waits path
 // (deferred) takes precedence when available.
 //
+// Self-blockers (granted entries owned by the same thread/PID as the
+// waiter) are filtered out. They appear when a thread holds a lower
+// MDL while waiting to upgrade — e.g. an ALTER holds
+// SHARED_UPGRADABLE while waiting for EXCLUSIVE — and the operator
+// expects "what's blocking me" to exclude themselves.
+//
 // If pid is not pending on this table, the result is nil.
 func (q MDLQueue) BlockersOf(pid uint64) []MDLEntry {
-	var requested string
+	var (
+		requested string
+		threadID  uint64
+	)
 	for _, e := range q.Pending {
 		if e.PID == pid {
 			requested = e.LockType
+			threadID = e.ThreadID
 			break
 		}
 	}
@@ -164,6 +174,9 @@ func (q MDLQueue) BlockersOf(pid uint64) []MDLEntry {
 	}
 	var out []MDLEntry
 	for _, h := range q.Granted {
+		if h.PID == pid || (threadID != 0 && h.ThreadID == threadID) {
+			continue // self
+		}
 		if conflicts(requested, h.LockType) {
 			out = append(out, h)
 		}

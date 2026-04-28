@@ -133,6 +133,34 @@ The status line, replication panel, and live issues work without
 need `performance_schema` enabled and panels self-describe their
 state when those data sources are missing.
 
+### MDL queue (key `M`)
+
+When an `ALTER TABLE` (or any other statement) is hanging on a
+metadata lock, press `M` to see the per-table grant queue. The view
+answers four operator questions in one screen:
+
+1. **Hottest tables** — list mode (default) sorts every table with a
+   pending MDL waiter by queue depth, with a `TYPES` column showing
+   the per-`LOCK_TYPE` bucket counts (`38×SHARED_READ
+   6×SHARED_WRITE 2×EXCLUSIVE`).
+2. **Lock-type breakdown** for one table — same TYPES column,
+   plus the full QUEUE/HOLDERS detail when you `enter` on a row.
+3. **Queue position** — detail mode renders every PENDING entry as
+   `#1`..`#N` in FIFO order (longest wait first ≈ MySQL's grant
+   order). Find your PID and read the `#` column.
+4. **Direct blockers** — detail mode's HOLDERS panel lists every
+   GRANTED holder. Press `B` to filter to just the holders whose
+   `LOCK_TYPE` is incompatible with the cursor waiter's request.
+
+Keys inside the M tab: `↑↓`/`j`/`k` navigate, `enter` opens a
+table's detail view, `B` toggles the blocker filter, `K` kills the
+selected waiter (with confirm), `esc` returns.
+
+The `wait/lock/metadata/sql/mdl` instrument is **off by default on
+MySQL 5.7 and 8.0 LTS**. The tool warns about this once at startup
+and the M tab renders the exact `UPDATE setup_instruments` SQL when
+the instrument is disabled. On MySQL 8.1+ it's on by default.
+
 ### Live perf insights inside the TUI
 
 Pass `--enable-perf-insights` to `monitor` to launch the digest, wait
@@ -225,14 +253,16 @@ make demo-down      # stop demo environment
 | O         | Overview (default tab) |
 | I         | Issues |
 | B         | Tables |
+| M         | MDL queue (per-table waiters + holders) |
 | L         | Lock tree |
 | t         | Top SQL (requires `--enable-perf-insights`) |
 | u/h/s     | (Overview) Cycle Load panel between USER / HOST / SCHEMA |
 | enter     | Drill into the focused row (filter set on the next view) |
 | K         | Kill the selected connection |
+| B         | (MDL detail) Toggle HOLDERS panel between all granted and "blockers only" for the cursor waiter |
 | s         | (Top) Cycle sort key — AAS → Calls → Latency → Rows |
 | e / Enter | (Top) EXPLAIN the highlighted digest |
-| esc       | Back out (returns to Overview from most views) |
+| esc       | Back out (returns to Overview from most views; from MDL detail, returns to MDL list first) |
 | q         | Quit |
 
 ## Development

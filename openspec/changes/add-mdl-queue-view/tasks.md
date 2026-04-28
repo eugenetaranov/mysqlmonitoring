@@ -27,6 +27,6 @@
 
 ## 5. Docs / shipping
 
-- [ ] 5.1 README: new "MDL queue (key M)" section. Lists the four operator questions and the keys that answer each. Updates the TUI Controls table.
-- [ ] 5.2 CHANGELOG: "Added — MDL queue view (key M)" plus a separate "Fixed — metadata_locks query selected non-existent LOCK_MODE column; the feature was silently disabled" line.
-- [ ] 5.3 Live smoke against MySQL 8.0 container per design-doc verification scenario.
+- [x] 5.1 README: new "MDL queue (key `M`)" section between Overview and Live perf insights, listing the four operator questions and answer keys. TUI Controls table updated with `M` and the MDL-detail `B` shortcut.
+- [x] 5.2 CHANGELOG: "Added — MDL queue view (key `M`)" entry detailing the four answered questions plus the `wait/lock/metadata/sql/mdl` instrument requirement, and a separate "Fixed — `MetadataLocks` query referenced non-existent `LOCK_MODE` column" line that explains the long-standing silent-failure bug.
+- [x] 5.3 Live smoke against MySQL 8.0.45 container with the design's exact scenario (SELECT … LOCK IN SHARE MODE in long transaction + ALTER TABLE + 5 concurrent INSERTs). End-to-end pipeline (`db.MetadataLocks` → `insights.BuildMDL` → `PositionOf`/`BlockersOf`) produced the expected output: ALTER at QUEUE #1/6 with EXCLUSIVE, 5 INSERTs queued at #2-6 with SHARED_WRITE, and `BlockersOf(ALTER)` returned **only** the SELECT's SHARED_READ holder — the ALTER's own self-held SHARED_UPGRADABLE was filtered out by the new self-blocker filter in `BlockersOf`. Smoke harness lives in `internal/insights/mdl_smoke_test.go` behind a `mdl_smoke` build tag so it's excluded from the default test run.

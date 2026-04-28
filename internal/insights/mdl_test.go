@@ -139,6 +139,35 @@ func TestBlockersOf_SharedReadOnlyBlockedByExclusiveTypes(t *testing.T) {
 	assert.Equal(t, "EXCLUSIVE", blockers[0].LockType)
 }
 
+func TestBlockersOf_FiltersSelfHeldUpgradeIntent(t *testing.T) {
+	// An ALTER (pid=17) holds SHARED_UPGRADABLE while waiting to
+	// upgrade to EXCLUSIVE. The real blocker is the OTHER session's
+	// SHARED_READ holder (pid=16). The ALTER's own SHARED_UPGRADABLE
+	// must be filtered out — operators don't expect to see themselves.
+	got := BuildMDL(snap(
+		db.MetadataLock{
+			ObjectType: "TABLE", ObjectSchema: "a", ObjectName: "t",
+			LockStatus: "GRANTED", LockType: "SHARED_READ",
+			PID: 16, ThreadID: 100, TimeSeconds: 60,
+		},
+		db.MetadataLock{
+			ObjectType: "TABLE", ObjectSchema: "a", ObjectName: "t",
+			LockStatus: "GRANTED", LockType: "SHARED_UPGRADABLE",
+			PID: 17, ThreadID: 101, TimeSeconds: 30,
+		},
+		db.MetadataLock{
+			ObjectType: "TABLE", ObjectSchema: "a", ObjectName: "t",
+			LockStatus: "PENDING", LockType: "EXCLUSIVE",
+			PID: 17, ThreadID: 101, TimeSeconds: 30,
+		},
+	))
+	q := got.Find("a", "t")
+	require.NotNil(t, q)
+	blockers := q.BlockersOf(17)
+	require.Len(t, blockers, 1)
+	assert.Equal(t, uint64(16), blockers[0].PID)
+}
+
 func TestBlockersOf_PIDNotPendingReturnsNil(t *testing.T) {
 	got := BuildMDL(snap(
 		mdl("a", "t", "GRANTED", "SHARED_READ", 10, 60),

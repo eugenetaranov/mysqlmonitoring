@@ -2,6 +2,41 @@
 
 ## Unreleased
 
+### Added — MDL queue view (key `M`)
+
+A new **MDL** tab inspects the `performance_schema.metadata_locks`
+grant queue per table. Designed for the on-incident question
+"my `ALTER TABLE` has been hanging for minutes — where is it in
+the queue and what's blocking it?" The view answers four questions:
+
+- **Hottest tables**: list mode sorts every contended table by
+  pending queue depth, with per-`LOCK_TYPE` bucket counts.
+- **Lock-type breakdown**: detail mode (press `enter` on a list
+  row) shows the full QUEUE and HOLDERS panels for one table.
+- **Queue position**: every PENDING entry is numbered `#1`..`#N`
+  in FIFO order — find your PID, read your rank.
+- **Direct blockers**: HOLDERS panel lists every GRANTED holder;
+  `B` toggles a filter that keeps only holders whose `LOCK_TYPE`
+  conflicts with the cursor waiter's request.
+
+Requires the `wait/lock/metadata/sql/mdl` instrument to be enabled
+(off by default on MySQL 5.7 / 8.0 LTS, on by default in 8.1+).
+The tool prints a one-shot warning at startup with the exact
+`UPDATE setup_instruments` SQL when it's off.
+
+### Fixed — `MetadataLocks` query referenced non-existent `LOCK_MODE` column
+
+The query backing `Snapshot.MetadataLocks` selected a column
+(`LOCK_MODE`) that does not exist on `performance_schema.metadata_locks`
+— the right column is `LOCK_TYPE`. Until now the failure has been
+silently swallowed by an `if err != nil { return nil, nil }`
+shortcut, leaving the `ddl_conflict` detector's
+`findPotentialBlockers` helper without input. The query is rewritten
+to select `LOCK_STATUS` (GRANTED / PENDING) plus the matching
+`performance_schema.threads` row's processlist user / host / SQL /
+wait age. Errors are now surfaced rather than swallowed so future
+regressions can't hide in the same way.
+
 ### Changed — Default view is now **Overview**
 
 `mysqlmonitoring monitor` opens on a new **Overview** tab instead of
