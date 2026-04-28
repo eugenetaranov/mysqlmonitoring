@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -298,27 +299,37 @@ func runMonitor(f flags, cmd *cobra.Command) error {
 	mon := monitor.New(database, cfg)
 	resultCh := mon.Run(ctx)
 
-	// Perf-insights: optional, runs alongside the lock monitor and
-	// never blocks it. Capability warnings print once to stderr.
-	var ins *insights.Insights
+	// Insights always starts so the Overview tab's health vitals
+	// (Threads_running, replica lag, HLL, etc.) render even without
+	// --enable-perf-insights. The perf-insights collectors themselves
+	// (digest/wait/CPU) are gated by ProbeCapabilities; the health
+	// collector runs unconditionally because SHOW GLOBAL STATUS works
+	// on any server. Probe warnings only print when the user opted in.
+	perfCfg := insights.Config{
+		PollInterval:        time.Duration(f.perfInterval) * time.Second,
+		CPUSampleInterval:   time.Duration(f.perfCPUSampleMillis) * time.Millisecond,
+		Window:              time.Duration(f.perfWindow) * time.Second,
+		MaxDigests:          f.perfMaxDigests,
+		SessionCapacity:     8192,
+		NewDigestProtection: 30 * time.Second,
+	}
+	ins := insights.New(perfCfg, database)
+	var probeWarn io.Writer
+	if f.enablePerfInsights {
+		probeWarn = os.Stderr
+	}
+	if err := ins.Probe(ctx, probeWarn); err != nil {
+		// Probe failure is non-fatal; the health collector still runs.
+		// Only surface to stderr when the user asked for perf-insights.
+		if f.enablePerfInsights {
+			fmt.Fprintf(os.Stderr, "perf-insights probe failed: %v\n", err)
+		}
+	}
+	go ins.Run(ctx)
+
 	var explainEngine *explain.Engine
 	if f.enablePerfInsights {
-		perfCfg := insights.Config{
-			PollInterval:        time.Duration(f.perfInterval) * time.Second,
-			CPUSampleInterval:   time.Duration(f.perfCPUSampleMillis) * time.Millisecond,
-			Window:              time.Duration(f.perfWindow) * time.Second,
-			MaxDigests:          f.perfMaxDigests,
-			SessionCapacity:     8192,
-			NewDigestProtection: 30 * time.Second,
-		}
-		ins = insights.New(perfCfg, database)
-		if err := ins.Probe(ctx, os.Stderr); err != nil {
-			fmt.Fprintf(os.Stderr, "perf-insights probe failed: %v\n", err)
-			ins = nil
-		} else {
-			go ins.Run(ctx)
-			explainEngine = explain.New(database)
-		}
+		explainEngine = explain.New(database)
 	}
 
 	// JSON log file. The file is opened here but its lifetime is

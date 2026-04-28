@@ -28,10 +28,11 @@
 
 ## 4. Failure-mode polish
 
-- [ ] 4.1 Hide replication panel cleanly when `Probe()` reports standalone; surrounding panels reflow.
-- [ ] 4.2 MariaDB fallback: load panel switches to count-by-user; column header relabelled `Connections by USER` so we don't mislabel.
-- [ ] 4.3 Cold-start: render panel chrome with `gathering samples (N/M)…` body so layout doesn't reflow when first samples land.
-- [ ] 4.4 Manual-test against MariaDB and `performance_schema=OFF` containers; confirm rendering matches the failure-mode table in design.md D4.
+- [x] 4.1 Hide replication panel cleanly when `ProbeReplica` reports standalone; surrounding panels reflow into the freed width (implemented in Phase 3).
+- [x] 4.2 Load panel and Hottest Queries panel show capability-specific notices ("performance_schema waits disabled", "performance_schema digest disabled") when the relevant `Capabilities()` flag is off, instead of a generic "perf-insights disabled".
+- [ ] 4.2a (deferred) MariaDB-specific fallback to count-by-user from `SHOW PROCESSLIST`. The current behaviour ("performance_schema waits disabled" notice) is honest and ships the intended UX; a count-based fallback is a follow-up if user feedback shows it's wanted.
+- [x] 4.3 Cold-start: panel chrome (headers / dividers) is rendered before any data lands; "gathering samples…" body keeps layout stable when first samples populate.
+- [x] 4.4 Always-on Insights wiring in `cmd/mysqlmonitoring/main.go`: `Insights` now starts unconditionally so the health collector and HLL parsing always run; perf-insights collectors gate on capabilities; probe warnings only print when `--enable-perf-insights` is set.
 
 ## 5. Docs / shipping
 

@@ -184,7 +184,14 @@ func renderLoadPanel(m Model, width int) string {
 	b.WriteString("\n")
 
 	if m.insights == nil || m.insights.Sessions == nil {
-		b.WriteString(dimStyle.Render("  perf-insights disabled"))
+		b.WriteString(dimStyle.Render("  load attribution unavailable"))
+		return b.String()
+	}
+	// performance_schema disabled / wait+session collectors won't
+	// run, so there will never be samples to attribute. Say so
+	// instead of letting the panel sit on "gathering samples…".
+	if caps := m.insights.Capabilities(); !caps.WaitsAvailable {
+		b.WriteString(dimStyle.Render("  performance_schema waits disabled"))
 		return b.String()
 	}
 
@@ -338,6 +345,10 @@ func renderHottestQueries(m Model, width int) string {
 
 	if m.insights == nil {
 		b.WriteString(dimStyle.Render("  perf-insights disabled"))
+		return b.String()
+	}
+	if caps := m.insights.Capabilities(); !caps.DigestAvailable {
+		b.WriteString(dimStyle.Render("  performance_schema digest disabled"))
 		return b.String()
 	}
 	digests := insights.TopSQL(m.insights.Registry, m.insights.Sessions, time.Now(),
