@@ -53,11 +53,15 @@ type Example struct {
 // flag controls whether the matching collector is allowed to run.
 // Warnings carries human-readable hints to print to stderr exactly once.
 type PerfCapabilities struct {
-	DigestAvailable      bool
-	WaitsAvailable       bool
-	HistoryLongAvailable bool
+	DigestAvailable       bool
+	WaitsAvailable        bool
+	HistoryLongAvailable  bool
 	ConnectAttrsAvailable bool
-	Warnings              []string
+	// MDLAvailable is true when wait/lock/metadata/sql/mdl is enabled
+	// in setup_instruments. Required for the metadata_locks table to
+	// be populated; off by default on MySQL 5.7 and 8.0 LTS.
+	MDLAvailable bool
+	Warnings     []string
 }
 
 // PerfInsightsDB is the narrow interface the perf-insights collectors
@@ -279,7 +283,34 @@ func (m *MySQLDB) ProbeCapabilities(ctx context.Context) (PerfCapabilities, erro
 				"app tags will only resolve from sqlcommenter SQL comments")
 	}
 
+	// MDL instrumentation: off by default on MySQL 5.7 and 8.0 LTS,
+	// without which performance_schema.metadata_locks stays empty and
+	// the M tab can't show queue depth, position, or holders.
+	caps.MDLAvailable = m.mdlInstrumentEnabled(ctx)
+	if !caps.MDLAvailable {
+		caps.Warnings = append(caps.Warnings,
+			"wait/lock/metadata/sql/mdl instrument is OFF; metadata_locks "+
+				"will be empty. Enable it with UPDATE performance_schema."+
+				"setup_instruments SET ENABLED='YES', TIMED='YES' "+
+				"WHERE NAME='wait/lock/metadata/sql/mdl';")
+	}
+
 	return caps, nil
+}
+
+// mdlInstrumentEnabled reports whether the MDL instrument is on. Off
+// by default on MySQL 5.7 / 8.0 LTS; on by default in 8.1+.
+func (m *MySQLDB) mdlInstrumentEnabled(ctx context.Context) bool {
+	const q = `SELECT ENABLED FROM performance_schema.setup_instruments
+	           WHERE NAME = 'wait/lock/metadata/sql/mdl' LIMIT 1`
+	var enabled string
+	if err := m.db.QueryRowContext(ctx, q).Scan(&enabled); err != nil {
+		// Unknown — could be MariaDB which exposes a different name.
+		// Treat as available so we don't surface a misleading warning;
+		// if metadata_locks is empty the view itself will hint instead.
+		return true
+	}
+	return enabled == "YES"
 }
 
 // queryConsumers reads setup_consumers into a map keyed by NAME with

@@ -54,15 +54,26 @@ type Process struct {
 	Info    string
 }
 
-// MetadataLock represents a metadata lock.
+// MetadataLock represents one row from performance_schema.metadata_locks
+// joined to the matching performance_schema.threads row so the operator
+// sees who holds (or is waiting on) what lock and on which session.
+//
+// LockStatus is the field that distinguishes a holder from a waiter:
+// "GRANTED" means this session is currently holding the lock,
+// "PENDING" means this session is queued waiting for it.
 type MetadataLock struct {
-	ThreadID  uint64
-	LockType  string
-	Duration  string
-	LockMode  string
-	ObjectType string
+	ThreadID     uint64 // performance_schema.threads.THREAD_ID (OWNER_THREAD_ID)
+	PID          uint64 // PROCESSLIST_ID — useful for KILL <id>
+	User         string // PROCESSLIST_USER
+	Host         string // PROCESSLIST_HOST
+	LockType     string // SHARED_READ, SHARED_WRITE, EXCLUSIVE, …
+	Duration     string // STATEMENT / TRANSACTION / EXPLICIT
+	LockStatus   string // GRANTED / PENDING / VICTIM / TIMEOUT / KILLED / …
+	ObjectType   string // TABLE / SCHEMA / FUNCTION / …
 	ObjectSchema string
-	ObjectName string
+	ObjectName   string
+	TimeSeconds  int64  // PROCESSLIST_TIME — wait age for PENDING, statement age for GRANTED
+	Info         string // PROCESSLIST_INFO — current SQL text
 }
 
 // DeadlockInfo holds parsed deadlock information from INNODB STATUS.

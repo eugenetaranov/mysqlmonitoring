@@ -311,32 +311,55 @@ func (m *MySQLDB) Processes(ctx context.Context) ([]Process, error) {
 	return procs, rows.Err()
 }
 
+// MetadataLocks returns one row per entry in
+// performance_schema.metadata_locks for tables, joined to
+// performance_schema.threads to pick up the matching session's
+// processlist user/host/info/time so the TUI can show who holds (or
+// who is waiting for) each lock without a second round-trip.
+//
+// The query orders by schema/name, then GRANTED-before-PENDING, then
+// wait-age descending so consumers can iterate the queue oldest-first.
+//
+// Errors are surfaced rather than swallowed: the previous behaviour of
+// silently returning nil, nil on any error hid a long-standing bug
+// where the SELECT referenced a non-existent LOCK_MODE column.
 func (m *MySQLDB) MetadataLocks(ctx context.Context) ([]MetadataLock, error) {
 	query := `
 		SELECT ` + queryTimeoutHint + `
-			COALESCE(THREAD_ID, 0),
-			COALESCE(LOCK_TYPE, ''),
-			COALESCE(LOCK_DURATION, ''),
-			COALESCE(LOCK_MODE, ''),
-			COALESCE(OBJECT_TYPE, ''),
-			COALESCE(OBJECT_SCHEMA, ''),
-			COALESCE(OBJECT_NAME, '')
-		FROM performance_schema.metadata_locks
-		WHERE OBJECT_TYPE = 'TABLE'
-		ORDER BY THREAD_ID`
+			COALESCE(ml.OBJECT_TYPE, ''),
+			COALESCE(ml.OBJECT_SCHEMA, ''),
+			COALESCE(ml.OBJECT_NAME, ''),
+			COALESCE(ml.LOCK_TYPE, ''),
+			COALESCE(ml.LOCK_DURATION, ''),
+			COALESCE(ml.LOCK_STATUS, ''),
+			COALESCE(ml.OWNER_THREAD_ID, 0),
+			COALESCE(t.PROCESSLIST_ID, 0),
+			COALESCE(t.PROCESSLIST_USER, ''),
+			COALESCE(t.PROCESSLIST_HOST, ''),
+			COALESCE(t.PROCESSLIST_TIME, 0),
+			COALESCE(t.PROCESSLIST_INFO, '')
+		FROM performance_schema.metadata_locks ml
+		LEFT JOIN performance_schema.threads t ON t.THREAD_ID = ml.OWNER_THREAD_ID
+		WHERE ml.OBJECT_TYPE = 'TABLE'
+		ORDER BY ml.OBJECT_SCHEMA, ml.OBJECT_NAME,
+		         FIELD(ml.LOCK_STATUS, 'GRANTED', 'PENDING'),
+		         t.PROCESSLIST_TIME DESC`
 
 	rows, err := m.queryWithRetry(ctx, query)
 	if err != nil {
-		// metadata_locks may not be available
-		return nil, nil
+		return nil, fmt.Errorf("metadata locks: %w", err)
 	}
 	defer rows.Close()
 
 	var locks []MetadataLock
 	for rows.Next() {
 		var ml MetadataLock
-		if err := rows.Scan(&ml.ThreadID, &ml.LockType, &ml.Duration, &ml.LockMode,
-			&ml.ObjectType, &ml.ObjectSchema, &ml.ObjectName); err != nil {
+		if err := rows.Scan(
+			&ml.ObjectType, &ml.ObjectSchema, &ml.ObjectName,
+			&ml.LockType, &ml.Duration, &ml.LockStatus,
+			&ml.ThreadID, &ml.PID, &ml.User, &ml.Host,
+			&ml.TimeSeconds, &ml.Info,
+		); err != nil {
 			return nil, fmt.Errorf("failed to scan metadata lock: %w", err)
 		}
 		locks = append(locks, ml)
