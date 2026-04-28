@@ -11,17 +11,92 @@ import (
 	"github.com/eugenetaranov/mysqlmonitoring/internal/detector"
 )
 
-var reTableName = regexp.MustCompile(`(?i)(?:FROM|INTO|UPDATE|TABLE)\s+` + "`?" + `(\w+)` + "`?")
+// reTableName matches the first table reference in a SQL statement.
+// It handles three common shapes:
+//   - bare:               FROM users
+//   - backtick-quoted:    FROM `users`
+//   - schema-qualified:   FROM `alice`.`hskp_message`  (or unquoted)
+//
+// The optional second capture group holds the table when the first
+// is a schema qualifier; extractTableFromSQL stitches them.
+var reTableName = regexp.MustCompile(
+	"(?i)(?:FROM|INTO|UPDATE|JOIN|TABLE)\\s+" +
+		"`?(\\w+)`?(?:\\s*\\.\\s*`?(\\w+)`?)?")
+
+// extractTableFromSQL returns "schema.table" when the statement
+// references a qualified table, "table" for an unqualified one, or
+// "" when no table-shaped reference is found. Leading SQL comments
+// are stripped first so sqlcommenter prefixes don't fool the regex.
+func extractTableFromSQL(sql string) string {
+	if sql == "" {
+		return ""
+	}
+	sql = stripLeadingSQLComments(sql)
+	if sql == "" {
+		return ""
+	}
+	m := reTableName.FindStringSubmatch(sql)
+	if len(m) == 0 {
+		return ""
+	}
+	if len(m) > 2 && m[2] != "" {
+		return m[1] + "." + m[2]
+	}
+	return m[1]
+}
+
+// stripLeadingSQLComments removes any number of leading SQL comments
+// (block /* ... */, line --, hash #) plus whitespace so the verb
+// extraction below sees the real statement. Returns an empty string
+// if the input is nothing but comments.
+func stripLeadingSQLComments(q string) string {
+	for {
+		s := strings.TrimLeft(q, " \t\r\n")
+		switch {
+		case strings.HasPrefix(s, "/*"):
+			end := strings.Index(s, "*/")
+			if end < 0 {
+				return ""
+			}
+			q = s[end+2:]
+		case strings.HasPrefix(s, "--"):
+			nl := strings.IndexByte(s, '\n')
+			if nl < 0 {
+				return ""
+			}
+			q = s[nl+1:]
+		case strings.HasPrefix(s, "#"):
+			nl := strings.IndexByte(s, '\n')
+			if nl < 0 {
+				return ""
+			}
+			q = s[nl+1:]
+		default:
+			return s
+		}
+	}
+}
 
 // simplifyQuery condenses a SQL query into a short label like DB monitoring tools.
 func simplifyQuery(q string) string {
 	if q == "" {
 		return ""
 	}
+	q = stripLeadingSQLComments(q)
+	if q == "" {
+		return ""
+	}
 	upper := strings.ToUpper(strings.TrimSpace(q))
+	// For label use we want just the table — schema.table makes the
+	// label too noisy for the lock-tree row format. Pick the
+	// rightmost qualifier when present.
 	tableName := ""
 	if m := reTableName.FindStringSubmatch(q); len(m) > 1 {
-		tableName = m[1]
+		if len(m) > 2 && m[2] != "" {
+			tableName = m[2]
+		} else {
+			tableName = m[1]
+		}
 	}
 
 	switch {
@@ -70,12 +145,21 @@ func simplifyQuery(q string) string {
 }
 
 // queryLabel returns the best available display label for a query.
-// It prefers the normalized DIGEST_TEXT from performance_schema, falling back
-// to the naive simplifyQuery() for cases where digest is unavailable
-// (perf_schema disabled, deadlocks from InnoDB status parser, etc).
+// It prefers the normalized DIGEST_TEXT from performance_schema,
+// falling back to a comment-stripped simplifyQuery() for cases where
+// digest is unavailable (perf_schema disabled, deadlocks from the
+// InnoDB-status parser, rolled-back deadlock victims, etc.).
+//
+// When neither source yields anything, an empty string is returned so
+// callers can render their own placeholder.
 func queryLabel(digest, rawQuery string) string {
+	digest = strings.TrimSpace(digest)
 	if digest != "" {
-		return digest
+		// Digest texts captured at the moment of deadlock can also
+		// carry leading hint comments; strip them for consistency.
+		if stripped := stripLeadingSQLComments(digest); stripped != "" {
+			return stripped
+		}
 	}
 	return simplifyQuery(rawQuery)
 }
@@ -296,19 +380,20 @@ func buildTreeEntries(lockWaits []db.LockWait, snapshot db.Snapshot) []treeEntry
 		walk(root, true)
 	}
 
-	// Append deadlock participants (if any) as killable entries.
-	// Only show if the participant is still alive in the process list.
-	// All deadlock entries are rendered with blocker styling (equal weight).
-	// First gets ┌, last gets └ to visually group them.
+	// Append deadlock participants. A deadlock has by definition >=2
+	// transactions, so we render every parsed participant — even
+	// rolled-back victims whose threads are gone from the process
+	// list. Showing only the survivor would mislead the operator
+	// into thinking it was a single-actor stall.
+	//
+	// All deadlock entries are rendered with blocker styling (equal
+	// weight). First gets ┌, last gets └ when there are multiple
+	// participants; a singleton gets a stand-alone connector.
 	if dl := snapshot.InnoDBStatus.LatestDeadlock; dl != nil {
-		aliveProcs := make(map[uint64]bool)
-		for _, p := range snapshot.Processes {
-			aliveProcs[p.ID] = true
-		}
-		var alive []db.DeadlockTransaction
+		var participants []db.DeadlockTransaction
 		for _, dt := range dl.Transactions {
-			if dt.ThreadID != 0 && aliveProcs[dt.ThreadID] {
-				alive = append(alive, dt)
+			if dt.ThreadID != 0 {
+				participants = append(participants, dt)
 			}
 		}
 		// Parse deadlock timestamp for duration fallback (rolled-back trx has no active transaction)
@@ -316,23 +401,28 @@ func buildTreeEntries(lockWaits []db.LockWait, snapshot db.Snapshot) []treeEntry
 		if dl.Timestamp != "" {
 			dlTime, _ = time.Parse("2006-01-02 15:04:05", dl.Timestamp)
 		}
-		for i, dt := range alive {
-			// Enrich with duration, query, and digest from live transaction/process data
-			query := dt.Query
+		for i, dt := range participants {
+			// Enrich with duration, query, and digest from live
+			// transaction/process data. The InnoDB-status text in
+			// dt.Query is least trustworthy: deadlock victims have
+			// already been rolled back, so the captured statement is
+			// often just a leading comment with no body. Prefer in
+			// order: live digest → live trx query → process info →
+			// raw InnoDB-status query.
 			var digest string
+			var query string
 			var durationMs int64
 			if trx, ok := trxByPID[dt.ThreadID]; ok {
 				if !trx.TrxStarted.IsZero() {
 					durationMs = snapshot.Time.Sub(trx.TrxStarted).Milliseconds()
 				}
-				if query == "" && trx.Query != "" {
-					query = trx.Query
-				}
 				if trx.DigestText != "" {
 					digest = trx.DigestText
 				}
+				if query == "" && trx.Query != "" {
+					query = trx.Query
+				}
 			}
-			// Fallback: time since deadlock detection
 			if durationMs == 0 && !dlTime.IsZero() {
 				durationMs = snapshot.Time.Sub(dlTime).Milliseconds()
 			}
@@ -340,6 +430,9 @@ func buildTreeEntries(lockWaits []db.LockWait, snapshot db.Snapshot) []treeEntry
 				if proc, ok := procByPID[dt.ThreadID]; ok && proc.Info != "" {
 					query = proc.Info
 				}
+			}
+			if query == "" {
+				query = dt.Query
 			}
 			table := dt.TableName
 			entries = append(entries, treeEntry{
@@ -352,7 +445,10 @@ func buildTreeEntries(lockWaits []db.LockWait, snapshot db.Snapshot) []treeEntry
 				table:      table,
 				isBlocker:  true,
 				isDeadlock: true,
-				isLast:     i == len(alive)-1 && i > 0,
+				// isLast marks the closing connector. A singleton
+				// participant is its own first-and-last; multiple
+				// participants close on the final entry.
+				isLast: i == len(participants)-1,
 			})
 		}
 	}
@@ -364,7 +460,11 @@ func renderHeader(m Model) string {
 	var b strings.Builder
 	snap := m.result.Snapshot
 
+	// Title row + tab bar on the same band so the "chrome" is one
+	// clear visual block before the data starts.
 	b.WriteString(titleStyle.Render("MySQL Lock Monitor"))
+	b.WriteString("\n")
+	b.WriteString(renderTabBar(m))
 	b.WriteString("\n\n")
 
 	if snap.ServerInfo.Version != "" {
@@ -383,6 +483,15 @@ func renderHeader(m Model) string {
 
 	b.WriteString(fmt.Sprintf("Transactions: %d | Lock Waits: %d | Processes: %d\n",
 		len(snap.Transactions), len(snap.LockWaits), len(snap.Processes)))
+
+	// Perf-insights sparkline header — only shown when insights is
+	// wired AND has at least one wait sample, so the lock-monitor
+	// experience is unchanged when the feature is off.
+	if m.insights != nil && len(m.sparkTrail) > 0 {
+		b.WriteString(renderSparklineHeader(m.width, m.sparkTrail, m.currentLoad))
+		b.WriteString("\n")
+	}
+
 	b.WriteString(strings.Repeat("─", min(60, m.width)))
 	b.WriteString("\n\n")
 
@@ -411,43 +520,51 @@ func renderView(m Model, body string) string {
 }
 
 func renderMain(m Model) string {
-	var b strings.Builder
-
-	// Issues section
-	if len(m.result.Issues) == 0 {
-		b.WriteString(infoStyle.Render("No issues detected."))
-		b.WriteString("\n")
-	} else {
-		b.WriteString(headerStyle.Render(fmt.Sprintf("Issues (%d):", len(m.result.Issues))))
-		b.WriteString("\n")
-		for _, issue := range m.result.Issues {
-			b.WriteString("  ")
-			b.WriteString(severityBadge(issue.Severity))
-			b.WriteString(" ")
-			b.WriteString(issue.Title)
-			b.WriteString("\n")
-			b.WriteString("    ")
-			b.WriteString(dimStyle.Render(truncateStr(issue.Description, m.width-6)))
-			b.WriteString("\n")
-		}
+	switch m.view {
+	case ViewIssues:
+		return renderView(m, renderIssuesView(m))
+	case ViewIssueDetail:
+		return renderView(m, renderIssueDetail(m))
+	case ViewTables:
+		return renderView(m, renderTablesView(m))
+	case ViewTop:
+		return renderView(m, renderTopPanel(m))
+	case ViewExplain:
+		return renderView(m, renderExplainModal(m))
+	case ViewHelp:
+		return renderView(m, renderHelp(m))
 	}
 
-	// Lock tree section (only if there are entries to show)
+	// ViewLock (default fallback)
+	var b strings.Builder
 	entries := buildTreeEntries(m.result.Snapshot.LockWaits, m.result.Snapshot)
-	if len(entries) > 0 {
+	if len(entries) == 0 {
+		b.WriteString(dimStyle.Render("  No lock contention detected."))
 		b.WriteString("\n")
+	} else {
 		b.WriteString(headerStyle.Render("Lock Tree:"))
 		b.WriteString("\n")
 		b.WriteString(renderLockTreeNav(m))
 	}
 
-	// Kill confirmation popup
 	if m.confirmKill {
 		b.WriteString("\n")
 		b.WriteString(criticalStyle.Render(fmt.Sprintf("  Kill connection %d? [y/N] ", m.confirmPID)))
 	}
 
 	return renderView(m, b.String())
+}
+
+// renderIssuesView wraps the issues table and adds a kill-confirm
+// footer if appropriate.
+func renderIssuesView(m Model) string {
+	var b strings.Builder
+	b.WriteString(renderIssuesTable(m))
+	if m.confirmKill {
+		b.WriteString("\n")
+		b.WriteString(criticalStyle.Render(fmt.Sprintf("  Kill connection %d? [y/N] ", m.confirmPID)))
+	}
+	return b.String()
 }
 
 func renderLockTreeNav(m Model) string {
@@ -505,9 +622,12 @@ func renderLockTreeNav(m Model) string {
 			if e.table != "" {
 				plainLine += " " + e.table
 			}
-			queryLabel := queryLabel(e.digest, e.query)
-			if queryLabel != "" {
-				plainLine += " [" + queryLabel + "]"
+			ql := queryLabel(e.digest, e.query)
+			if ql == "" && e.isDeadlock {
+				ql = "(deadlock victim, rolled back)"
+			}
+			if ql != "" {
+				plainLine += " [" + ql + "]"
 			}
 		} else {
 			connector := "├"
@@ -525,9 +645,12 @@ func renderLockTreeNav(m Model) string {
 			if e.table != "" {
 				plainLine += " " + e.table
 			}
-			queryLabel := queryLabel(e.digest, e.query)
-			if queryLabel != "" {
-				plainLine += " [" + queryLabel + "]"
+			ql := queryLabel(e.digest, e.query)
+			if ql == "" && e.isDeadlock {
+				ql = "(deadlock victim, rolled back)"
+			}
+			if ql != "" {
+				plainLine += " [" + ql + "]"
 			}
 		}
 
@@ -552,9 +675,12 @@ func renderLockTreeNav(m Model) string {
 			if e.table != "" {
 				line += hs.Render(" "+e.table)
 			}
-			queryLabel := queryLabel(e.digest, e.query)
-			if queryLabel != "" {
-				line += hs.Render(" ["+queryLabel+"]")
+			ql := queryLabel(e.digest, e.query)
+			if ql == "" && e.isDeadlock {
+				ql = "(deadlock victim, rolled back)"
+			}
+			if ql != "" {
+				line += hs.Render(" [" + ql + "]")
 			}
 			b.WriteString(selectedStyle.Render(prefix) + line)
 		} else if e.isBlocker {
@@ -574,9 +700,12 @@ func renderLockTreeNav(m Model) string {
 			if e.table != "" {
 				line += " " + headerStyle.Render(e.table)
 			}
-			queryLabel := queryLabel(e.digest, e.query)
-			if queryLabel != "" {
-				line += " " + headerStyle.Render("["+queryLabel+"]")
+			ql := queryLabel(e.digest, e.query)
+			if ql == "" && e.isDeadlock {
+				ql = "(deadlock victim, rolled back)"
+			}
+			if ql != "" {
+				line += " " + headerStyle.Render("[" + ql + "]")
 			}
 			b.WriteString(prefix + line)
 		} else {
@@ -597,6 +726,9 @@ func renderLockTreeNav(m Model) string {
 				dimPart += " " + e.table
 			}
 			ql := queryLabel(e.digest, e.query)
+			if ql == "" && e.isDeadlock {
+				ql = "(deadlock victim, rolled back)"
+			}
 			if ql != "" {
 				dimPart += " [" + ql + "]"
 			}
@@ -613,9 +745,38 @@ func renderStatusBar(m Model) string {
 	if m.statusMsg != "" {
 		status += " | " + m.statusMsg
 	}
-	if len(m.result.Snapshot.LockWaits) > 0 {
-		status += " | j/k:navigate K:kill"
+
+	switch m.view {
+	case ViewIssues:
+		if m.issuesTableFilter != "" {
+			status += " | filter=" + m.issuesTableFilter
+		}
+		status += " | j/k enter:detail y:yank K:kill /:clear B:tables tab/L:lock ?:help"
+		return status
+	case ViewIssueDetail:
+		status += " | y:yank K:kill esc:back ?:help"
+		return status
+	case ViewLock:
+		status += " | j/k K:kill tab/I:issues B:tables ?:help"
+		return status
+	case ViewTables:
+		status += " | j/k enter:drill K:kill-all I:issues L:lock ?:help"
+		return status
+	case ViewTop:
+		status += " | j/k s:sort e:explain esc:back ?:help"
+		if m.insights != nil {
+			status += fmt.Sprintf(" | digests=%d evicted=%d",
+				m.insights.Registry.Len(), m.insights.Registry.Evicted())
+		}
+		return status
+	case ViewExplain:
+		status += " | esc:back ?:help"
+		return status
+	case ViewHelp:
+		status += " | press any key to dismiss"
+		return status
 	}
+
 	status += " | q:quit"
 	return status
 }

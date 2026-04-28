@@ -85,6 +85,7 @@ func (d *DeadlockDetector) Detect(snapshot db.Snapshot) []Issue {
 		details[prefix+"query"] = trx.Query
 		details[prefix+"user"] = trx.User
 		details[prefix+"host"] = trx.Host
+		details[prefix+"table"] = trx.TableName
 	}
 
 	return []Issue{

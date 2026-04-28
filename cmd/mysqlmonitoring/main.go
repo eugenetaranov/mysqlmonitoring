@@ -7,6 +7,8 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strconv"
+	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -14,6 +16,8 @@ import (
 
 	"github.com/eugenetaranov/mysqlmonitoring/internal/db"
 	"github.com/eugenetaranov/mysqlmonitoring/internal/detector"
+	"github.com/eugenetaranov/mysqlmonitoring/internal/explain"
+	"github.com/eugenetaranov/mysqlmonitoring/internal/insights"
 	"github.com/eugenetaranov/mysqlmonitoring/internal/killer"
 	"github.com/eugenetaranov/mysqlmonitoring/internal/monitor"
 	"github.com/eugenetaranov/mysqlmonitoring/internal/output"
@@ -40,6 +44,13 @@ type flags struct {
 	longQueryThreshold int
 	outputFormat       string
 	logFile            string
+
+	// Perf-insights flags. Defaults match insights.DefaultConfig().
+	enablePerfInsights  bool
+	perfInterval        int // seconds
+	perfWindow          int // seconds
+	perfMaxDigests      int
+	perfCPUSampleMillis int
 }
 
 func main() {
@@ -75,7 +86,12 @@ func main() {
 	monitorCmd.Flags().IntVar(&f.lockWaitThreshold, "lock-wait-threshold", 10, "Lock wait warning threshold in seconds")
 	monitorCmd.Flags().IntVar(&f.longQueryThreshold, "long-query-threshold", 30, "Long query warning threshold in seconds")
 	monitorCmd.Flags().StringVar(&f.outputFormat, "output", "tui", "Output format: tui, text, json")
-	monitorCmd.Flags().StringVar(&f.logFile, "log-file", defaultLogFile(), "Append JSON log of each snapshot to this file")
+	monitorCmd.Flags().StringVar(&f.logFile, "log-file", "", "Append JSON log of each snapshot to this file (default: ~/.mysqlmonitoring/<host>_<timestamp>.log; pass empty string to disable)")
+	monitorCmd.Flags().BoolVar(&f.enablePerfInsights, "enable-perf-insights", false, "Collect query digests, wait events and CPU AAS into in-memory series")
+	monitorCmd.Flags().IntVar(&f.perfInterval, "perf-interval", 10, "Perf-insights poll interval in seconds")
+	monitorCmd.Flags().IntVar(&f.perfWindow, "perf-window", 3600, "Perf-insights in-memory retention window in seconds")
+	monitorCmd.Flags().IntVar(&f.perfMaxDigests, "perf-max-digests", 2000, "Maximum number of distinct digests held in memory")
+	monitorCmd.Flags().IntVar(&f.perfCPUSampleMillis, "perf-cpu-sample-ms", 1000, "CPU AAS sampling interval in milliseconds")
 
 	statusCmd := &cobra.Command{
 		Use:   "status",
@@ -101,6 +117,7 @@ func main() {
 	}
 
 	rootCmd.AddCommand(monitorCmd, statusCmd, killCmd)
+	registerPerfCommands(rootCmd, &f)
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
@@ -173,12 +190,80 @@ func buildConfig(f flags) monitor.Config {
 	return cfg
 }
 
-func defaultLogFile() string {
+// resolvedHost returns the host that will be used for the connection,
+// taking the explicit --host flag, --dsn, or .my.cnf into account.
+func resolvedHost(f flags, cmd *cobra.Command) string {
+	if cmd.Flags().Changed("host") && f.host != "" {
+		return f.host
+	}
+	if f.dsn != "" {
+		// Best-effort host extraction from DSN forms like
+		// "user:pass@tcp(host:port)/db" or "mysql://user:pass@host:port/db".
+		s := f.dsn
+		if i := strings.Index(s, "@tcp("); i >= 0 {
+			rest := s[i+len("@tcp("):]
+			if j := strings.IndexAny(rest, ":)"); j >= 0 {
+				if h := strings.TrimSpace(rest[:j]); h != "" {
+					return h
+				}
+			}
+		}
+		if strings.HasPrefix(s, "mysql://") {
+			rest := strings.TrimPrefix(s, "mysql://")
+			if i := strings.LastIndex(rest, "@"); i >= 0 {
+				rest = rest[i+1:]
+			}
+			if i := strings.IndexAny(rest, ":/"); i >= 0 {
+				rest = rest[:i]
+			}
+			if rest != "" {
+				return rest
+			}
+		}
+	}
+	cnfPath := f.defaultsFile
+	if cnfPath == "" {
+		cnfPath = db.DefaultMyCnfPath()
+	}
+	if cnf, err := db.ReadMyCnf(cnfPath); err == nil && cnf.Host != "" {
+		return cnf.Host
+	}
+	if f.host != "" {
+		return f.host
+	}
+	return "localhost"
+}
+
+// sessionLogFile builds the per-session log path
+// ~/.mysqlmonitoring/<sanitized-host>_<YYYY-MM-DD_HHMMSS>.log.
+func sessionLogFile(host string, now time.Time) string {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return ""
 	}
-	return filepath.Join(home, ".mysqlmonitoring", "monitor.log")
+	name := fmt.Sprintf("%s_%s.log", sanitizeHost(host), now.Format("2006-01-02_150405"))
+	return filepath.Join(home, ".mysqlmonitoring", name)
+}
+
+// sanitizeHost replaces filesystem-unfriendly characters with '_'.
+func sanitizeHost(host string) string {
+	if host == "" {
+		return "unknown-host"
+	}
+	var b strings.Builder
+	b.Grow(len(host))
+	for _, r := range host {
+		switch {
+		case r >= 'a' && r <= 'z',
+			r >= 'A' && r <= 'Z',
+			r >= '0' && r <= '9',
+			r == '.' || r == '-' || r == '_':
+			b.WriteRune(r)
+		default:
+			b.WriteRune('_')
+		}
+	}
+	return b.String()
 }
 
 func secondsToDuration(s int) time.Duration {
@@ -186,6 +271,12 @@ func secondsToDuration(s int) time.Duration {
 }
 
 func runMonitor(f flags, cmd *cobra.Command) error {
+	// Default the log path to one file per session: <host>_<timestamp>.log.
+	// An explicit --log-file="" still opts out of file logging.
+	if !cmd.Flags().Changed("log-file") {
+		f.logFile = sessionLogFile(resolvedHost(f, cmd), time.Now())
+	}
+
 	database, err := connect(f, cmd)
 	if err != nil {
 		return fmt.Errorf("failed to connect: %w", err)
@@ -207,7 +298,34 @@ func runMonitor(f flags, cmd *cobra.Command) error {
 	mon := monitor.New(database, cfg)
 	resultCh := mon.Run(ctx)
 
-	// JSON log file
+	// Perf-insights: optional, runs alongside the lock monitor and
+	// never blocks it. Capability warnings print once to stderr.
+	var ins *insights.Insights
+	var explainEngine *explain.Engine
+	if f.enablePerfInsights {
+		perfCfg := insights.Config{
+			PollInterval:        time.Duration(f.perfInterval) * time.Second,
+			CPUSampleInterval:   time.Duration(f.perfCPUSampleMillis) * time.Millisecond,
+			Window:              time.Duration(f.perfWindow) * time.Second,
+			MaxDigests:          f.perfMaxDigests,
+			SessionCapacity:     8192,
+			NewDigestProtection: 30 * time.Second,
+		}
+		ins = insights.New(perfCfg, database)
+		if err := ins.Probe(ctx, os.Stderr); err != nil {
+			fmt.Fprintf(os.Stderr, "perf-insights probe failed: %v\n", err)
+			ins = nil
+		} else {
+			go ins.Run(ctx)
+			explainEngine = explain.New(database)
+		}
+	}
+
+	// JSON log file. The file is opened here but its lifetime is
+	// managed explicitly per output mode below: closing it before the
+	// log writers stop produces "file already closed" errors, so we
+	// avoid `defer logFile.Close()` and instead close after the
+	// writer goroutines drain.
 	var logFile *os.File
 	if f.logFile != "" {
 		if err := os.MkdirAll(filepath.Dir(f.logFile), 0755); err != nil {
@@ -218,32 +336,68 @@ func runMonitor(f flags, cmd *cobra.Command) error {
 		if err != nil {
 			return fmt.Errorf("failed to open log file: %w", err)
 		}
-		defer logFile.Close()
 		fmt.Fprintf(os.Stderr, "Logging to %s\n", f.logFile)
 	}
 
+	// logMu protects logFile so the TUI's forwarder goroutine and any
+	// late-arriving writes can't race with Close.
+	var (
+		logMu     sync.Mutex
+		logClosed bool
+	)
 	writeLog := func(result monitor.Result) {
-		if logFile != nil {
-			if err := output.FormatJSON(logFile, result); err != nil {
-				fmt.Fprintf(os.Stderr, "Log write error: %v\n", err)
-			}
+		if logFile == nil {
+			return
 		}
+		logMu.Lock()
+		defer logMu.Unlock()
+		if logClosed {
+			return
+		}
+		if err := output.FormatJSON(logFile, result); err != nil {
+			fmt.Fprintf(os.Stderr, "Log write error: %v\n", err)
+		}
+	}
+	closeLog := func() {
+		if logFile == nil {
+			return
+		}
+		logMu.Lock()
+		logClosed = true
+		_ = logFile.Close()
+		logMu.Unlock()
 	}
 
 	switch f.outputFormat {
 	case "tui":
 		if logFile != nil {
 			logged := make(chan monitor.Result, 1)
+			var wg sync.WaitGroup
+			wg.Add(1)
 			go func() {
+				defer wg.Done()
 				defer close(logged)
 				for result := range resultCh {
 					writeLog(result)
-					logged <- result
+					// If the TUI consumer is gone, drop the message
+					// rather than block forever; we still drain
+					// resultCh so the monitor goroutine can exit.
+					select {
+					case logged <- result:
+					case <-ctx.Done():
+					}
 				}
 			}()
-			return tui.Run(logged, database)
+			err := tui.Run(logged, database, ins, explainEngine)
+			cancel()
+			wg.Wait()
+			closeLog()
+			return err
 		}
-		return tui.Run(resultCh, database)
+		err := tui.Run(resultCh, database, ins, explainEngine)
+		cancel()
+		closeLog()
+		return err
 	case "json":
 		for result := range resultCh {
 			writeLog(result)
@@ -251,12 +405,14 @@ func runMonitor(f flags, cmd *cobra.Command) error {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			}
 		}
+		closeLog()
 	case "text":
 		for result := range resultCh {
 			writeLog(result)
 			fmt.Print("\033[2J\033[H")
 			output.FormatText(os.Stdout, result)
 		}
+		closeLog()
 	default:
 		return fmt.Errorf("unknown output format: %s", f.outputFormat)
 	}

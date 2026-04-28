@@ -182,6 +182,16 @@ func (d *LockChainDetector) Detect(snapshot db.Snapshot) []Issue {
 			}
 		}
 
+		// Surface the contended table in a structured field so the
+		// TUI's Tables view can group lock chains directly without
+		// re-parsing the chain description.
+		var lockTable string
+		if len(chain) > 1 {
+			if w, ok := graph.WaitInfo[chain[1]]; ok {
+				lockTable = w.LockTable
+			}
+		}
+
 		issues = append(issues, Issue{
 			Detector:    d.Name(),
 			Severity:    severity,
@@ -193,6 +203,7 @@ func (d *LockChainDetector) Detect(snapshot db.Snapshot) []Issue {
 				"chain":           chainDesc,
 				"root_query":      rootQuery,
 				"blocked_queries": strings.Join(blockedQueries, ", "),
+				"lock_table":      lockTable,
 			},
 		})
 	}
