@@ -8,8 +8,8 @@
 
 ## 2. Aggregation
 
-- [ ] 2.1 Create `internal/insights/mdl.go` with `MDLEntry`, `MDLQueue`, `MDLBreakdown`; `BuildMDL`, `Find`, `PositionOf`, `BlockersOf`; static `mdlCompat` map.
-- [ ] 2.2 Tests in `internal/insights/mdl_test.go`: empty snap, one table mixed GRANTED/PENDING, multi-table sort by depth, position-of-known-PID (rank,total), position-of-unknown-PID, blocker derivation per compatibility rule (EXCLUSIVE blocks every other type, SHARED_READ blocks EXCLUSIVE only, etc.).
+- [x] 2.1 Created `internal/insights/mdl.go` with `MDLEntry`, `MDLQueue`, `MDLBreakdown`; `BuildMDL`, `Find`, `PositionOf`, `BlockersOf`; static `mdlCompat` map. Pending sorted oldest-first; granted sorted by holder age desc; tables sorted by queue depth then oldest pending wait age. Conservative `conflicts` reports true on unknown lock types so we never mislabel a hidden blocker as harmless.
+- [x] 2.2 13 tests covering: empty snap, non-table entries skipped, group-and-split holders/waiters, sort-by-depth-then-age tiebreak, position-of-found, position-of-missing, head-of-queue, EXCLUSIVE-sees-every-holder, SHARED_READ-only-blocked-by-EXCLUSIVE-types, PID-not-pending-returns-nil, unknown-lock-type-is-conservative, find-missing-table, transient-states-dropped (VICTIM/TIMEOUT).
 
 ## 3. TUI
 
