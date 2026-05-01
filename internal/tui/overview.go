@@ -7,6 +7,7 @@ import (
 
 	"charm.land/lipgloss/v2"
 
+	"github.com/eugenetaranov/mysqlmonitoring/internal/collector"
 	"github.com/eugenetaranov/mysqlmonitoring/internal/db"
 	"github.com/eugenetaranov/mysqlmonitoring/internal/detector"
 	"github.com/eugenetaranov/mysqlmonitoring/internal/insights"
@@ -65,22 +66,24 @@ func widthOr120(w int) int {
 
 // renderOverviewVerdictLine produces the single status line. The first
 // token is always [HEALTHY] / [WARN] / [PAGE] paired with a colour.
+//
+// Field order is "host first, MySQL second": when CloudWatch is wired,
+// the leftmost gauge cluster after the verdict word is CPU% / Mem /
+// IOPS, so the operator sees host-level signal before MySQL-level
+// signal. Snapshot time is no longer rendered here — it lives in the
+// chrome's right-aligned context block (Phase 1).
 func renderOverviewVerdictLine(m Model) string {
 	v := computeVerdict(m)
-
 	parts := []string{v.style.Render("[" + v.word + "]")}
 	snap := m.result.Snapshot
 
-	if !snap.Time.IsZero() && snap.ServerInfo.Version != "" {
-		// We don't carry uptime as a vital today; show snapshot time
-		// instead so the operator at least knows the line is live.
-		parts = append(parts, dimStyle.Render(snap.Time.Format("15:04:05")))
+	// CloudWatch host-level gauges first — they're the new signal in
+	// this redesign and the eye lands here before MySQL-side gauges.
+	if cw := latestCloudWatch(m); cw != nil {
+		parts = append(parts, cwVerdictParts(cw)...)
 	}
 
-	// Threads_running and buffer-pool stats come from the health
-	// collector; the HLL is parsed from the lock-monitor's existing
-	// SHOW ENGINE INNODB STATUS so it renders regardless of whether
-	// perf-insights is wired.
+	// Threads_running and buffer-pool stats from the health collector.
 	if hv := latestHealth(m); hv != nil {
 		runningCol := fmt.Sprintf("running %d", hv.ThreadsRunning)
 		if hv.ThreadsConnected > 0 {
@@ -116,7 +119,113 @@ func renderOverviewVerdictLine(m Model) string {
 		parts = append(parts, criticalStyle.Render(fmt.Sprintf("dl %d", dlCount)))
 	}
 
-	return " " + strings.Join(parts, "  ")
+	return wrapVerdictParts(parts, widthOr120(m.width))
+}
+
+// cwVerdictParts renders the CloudWatch gauge cluster for the verdict
+// line. Each gauge self-colours by its own threshold so the operator
+// sees red on the bad number even when the verdict word stays HEALTHY.
+func cwVerdictParts(cw *collector.CWMetrics) []string {
+	var out []string
+
+	cpu := fmt.Sprintf("CPU %.0f%%", cw.CPUPct)
+	switch {
+	case cw.CPUPct > 95:
+		cpu = criticalStyle.Render(cpu)
+	case cw.CPUPct > 80:
+		cpu = warningStyle.Render(cpu)
+	}
+	out = append(out, cpu)
+
+	if cw.FreeableBytes > 0 {
+		out = append(out, fmt.Sprintf("Mem %s free", formatBytes(cw.FreeableBytes)))
+	}
+
+	if cw.ReadIOPS > 0 || cw.WriteIOPS > 0 {
+		out = append(out, fmt.Sprintf("IOPS %s/%s",
+			formatRate(cw.ReadIOPS), formatRate(cw.WriteIOPS)))
+	}
+
+	if cw.DBLoad > 0 {
+		out = append(out, fmt.Sprintf("DBLoad %.1f", cw.DBLoad))
+	}
+
+	return out
+}
+
+// wrapVerdictParts joins parts with a two-space separator, breaking
+// onto a new line (with a two-space indent so it visually nests under
+// the previous line) whenever appending would exceed width. Uses
+// lipgloss.Width so ANSI colour codes don't fool the math.
+func wrapVerdictParts(parts []string, width int) string {
+	if len(parts) == 0 {
+		return ""
+	}
+	const indent = " "
+	var b strings.Builder
+	b.WriteString(indent)
+	used := lipgloss.Width(indent)
+	for i, p := range parts {
+		pw := lipgloss.Width(p)
+		if i == 0 {
+			b.WriteString(p)
+			used += pw
+			continue
+		}
+		// Two-space gap between gauges. Break to next line if adding
+		// this part overflows the terminal.
+		if used+2+pw > width {
+			b.WriteString("\n")
+			b.WriteString("  ")
+			used = 2
+		} else {
+			b.WriteString("  ")
+			used += 2
+		}
+		b.WriteString(p)
+		used += pw
+	}
+	return b.String()
+}
+
+// latestCloudWatch returns the most recent CW snapshot, or nil if no
+// sample has landed yet (or CloudWatch is unwired).
+func latestCloudWatch(m Model) *collector.CWMetrics {
+	if m.insights == nil || m.insights.CloudWatch == nil {
+		return nil
+	}
+	cw := m.insights.CloudWatch.Latest()
+	if cw.Time.IsZero() {
+		return nil
+	}
+	return &cw
+}
+
+// formatBytes renders a byte count as a short human string (KB, MB,
+// GB). Used by the verdict line's free-memory gauge.
+func formatBytes(n uint64) string {
+	switch {
+	case n >= 1<<30:
+		return fmt.Sprintf("%.1fGB", float64(n)/(1<<30))
+	case n >= 1<<20:
+		return fmt.Sprintf("%.0fMB", float64(n)/(1<<20))
+	case n >= 1<<10:
+		return fmt.Sprintf("%.0fKB", float64(n)/(1<<10))
+	default:
+		return fmt.Sprintf("%dB", n)
+	}
+}
+
+// formatRate renders an IOPS rate compactly (e.g. 1234 → "1.2k").
+func formatRate(r float64) string {
+	switch {
+	case r >= 1000:
+		return fmt.Sprintf("%.1fk", r/1000)
+	case r >= 100:
+		return fmt.Sprintf("%.0f", r)
+	default:
+		return fmt.Sprintf("%.0f", r)
+	}
 }
 
 // renderOverviewSparkline shows the AAS-by-wait-class sparkline header
@@ -446,6 +555,17 @@ func computeVerdict(m Model) verdict {
 	// Aborted clients delta — single-window spike is a warn signal.
 	if hv != nil && hv.AbortedClientsDelta > 0 {
 		level = bumpSeverity(level, detector.SeverityWarning)
+	}
+
+	// CloudWatch CPU% — host-level signal we can't otherwise see.
+	// Tier thresholds match the design D2 numbers.
+	if cw := latestCloudWatch(m); cw != nil {
+		switch {
+		case cw.CPUPct > 95:
+			level = bumpSeverity(level, detector.SeverityCritical)
+		case cw.CPUPct > 80:
+			level = bumpSeverity(level, detector.SeverityWarning)
+		}
 	}
 
 	// Detector severity

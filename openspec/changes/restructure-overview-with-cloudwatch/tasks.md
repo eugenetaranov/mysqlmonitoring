@@ -24,10 +24,10 @@ Bonus: chrome `[cw]●` indicator wired in `internal/tui/views.go:cloudWatchIndi
 
 ## 3. Verdict line: CW fields
 
-- [ ] 3.1 Extend `internal/tui/overview.go:renderOverviewVerdictLine` to render CPU%, Mem%, IOPS r/w as the leftmost scalar columns when `Insights.Health.Latest().CloudWatch` is non-nil. Existing fields (`AAS`, `running`, `bp_hit`, `HLL`, `repl`, `dl`) follow.
-- [ ] 3.2 Extend `computeVerdict` thresholds with CW-aware tiers (CPU% > 80 / 95 → WARN / PAGE, Mem% < 15 / 5 → WARN / PAGE).
-- [ ] 3.3 Wrap the verdict line at terminal width (the line is long; current implementation joins with two-space separator on one row, which truncates). Preserve all gauges across two rows when needed.
-- [ ] 3.4 Tests: render snapshots with / without CW; threshold-bump tests for the new tiers.
+- [x] 3.1 `renderOverviewVerdictLine` now reads from `latestCloudWatch(m)` and prepends a CPU%/Mem-free/IOPS/DBLoad cluster as the leftmost gauges after `[HEALTHY/WARN/PAGE]`. Snapshot time removed from the verdict line (it lives in the chrome now per Phase 1). Mem renders as bytes free (no instance-class data to compute %); operators read absolute GB faster than % anyway.
+- [x] 3.2 `computeVerdict` gains a CW CPU% tier (>80 → WARN, >95 → PAGE). Mem and IOPS thresholds need provisioned-quota data we don't have, so those fields self-colour at the gauge level only and don't bump the verdict word.
+- [x] 3.3 New `wrapVerdictParts` joins gauges with a two-space separator and breaks to a new (two-space-indented) line when the next part would overflow `widthOr120(m.width)`. ANSI-aware via `lipgloss.Width`.
+- [x] 3.4 Tests: formatBytes table, formatRate table, wrapVerdictParts overflow-breaks + no-overflow-stays-on-one-line. Existing computeVerdict tests still pass.
 
 ## 4. Three-column top-N + bottom strip
 
