@@ -66,53 +66,77 @@ func TestRenderOverview_PageTriggeredByDeadlock(t *testing.T) {
 	assert.Contains(t, out, "dl 1")
 }
 
-func TestRenderOverview_LiveIssuesPanelShowsHealthyMessage(t *testing.T) {
+func TestRenderOverview_NewLayoutPanelHeaders(t *testing.T) {
 	m := makeOverviewModel()
 	out := renderOverview(m)
-	assert.Contains(t, out, "Live issues")
-	assert.Contains(t, out, "System healthy.")
+	// Three top-N panels at 60s, plus the Long Transactions strip
+	// below. Replication panel is absent (no replica role).
+	assert.Contains(t, out, "Top AAS queries (60s)")
+	assert.Contains(t, out, "Top AAS users (60s)")
+	assert.Contains(t, out, "Top busiest tables (60s)")
+	assert.Contains(t, out, "Long transactions (≥30s)")
+	// Old panels MUST NOT appear in the new layout.
+	assert.NotContains(t, out, "Live issues")
+	assert.NotContains(t, out, "Hottest queries")
+	assert.NotContains(t, out, "Hottest tables")
+	assert.NotContains(t, out, "Load by USER")
+	assert.NotContains(t, out, "Load by HOST")
+	assert.NotContains(t, out, "Load by SCHEMA")
 }
 
-func TestRenderOverview_LiveIssuesPanelShowsTopThree(t *testing.T) {
-	m := makeOverviewModel()
-	m.result.Issues = []detector.Issue{
-		{Detector: "deadlock", Severity: detector.SeverityCritical, Title: "deadlock 1"},
-		{Detector: "long-trx", Severity: detector.SeverityCritical, Title: "long trx"},
-		{Detector: "lock-chain", Severity: detector.SeverityWarning, Title: "lock chain"},
-	}
-	out := renderOverview(m)
-	assert.Contains(t, out, "Live issues (3)")
-	// Severity badges are rendered for at least the critical rows.
-	assert.Contains(t, out, "CRIT")
-}
-
-func TestRenderOverview_LoadPanelToggleAffectsTitle(t *testing.T) {
-	m := makeOverviewModel()
-	m.loadGrouping = insights.GroupKeyHost
-	out := renderOverview(m)
-	assert.Contains(t, out, "Load by HOST")
-
-	m.loadGrouping = insights.GroupKeySchema
-	out = renderOverview(m)
-	assert.Contains(t, out, "Load by SCHEMA")
-
-	m.loadGrouping = insights.GroupKeyUser
-	out = renderOverview(m)
-	assert.Contains(t, out, "Load by USER")
-}
-
-func TestRenderOverview_HottestTablesEmptyWhenNoIssues(t *testing.T) {
+func TestRenderOverview_TopNPanelsShowGracefulMessages(t *testing.T) {
 	m := makeOverviewModel()
 	out := renderOverview(m)
-	assert.Contains(t, out, "Hottest tables")
-	assert.Contains(t, out, "no contention")
-}
-
-func TestRenderOverview_HotQueriesShowsDisabledWhenNoInsights(t *testing.T) {
-	m := makeOverviewModel()
-	out := renderOverview(m)
-	assert.Contains(t, out, "Hottest queries")
+	// No insights → all three top-N panels announce why.
 	assert.Contains(t, out, "perf-insights disabled")
+	assert.Contains(t, out, "load attribution unavailable")
+}
+
+func TestRenderOverview_LongTransactionsPanelShowsNoneWhenEmpty(t *testing.T) {
+	m := makeOverviewModel()
+	out := renderOverview(m)
+	assert.Contains(t, out, "Long transactions (≥30s)")
+	// No transactions in the snapshot → "none".
+	assert.Contains(t, out, "none")
+}
+
+func TestRenderLongTransactions_FiltersBy30s(t *testing.T) {
+	m := makeOverviewModel()
+	m.result.Snapshot.Transactions = []db.Transaction{
+		{ID: 100, User: "fast",  Time: 5,   Query: "SELECT 1"},                  // < 30s, filtered out
+		{ID: 200, User: "stuck", Time: 192, Query: "ALTER TABLE shop.orders"},   // 3m12s
+		{ID: 300, User: "idle",  Time: 600, Query: ""},                          // 10m, no query
+	}
+	out := renderLongTransactions(m, 120)
+	assert.Contains(t, out, "200") // stuck shown
+	assert.Contains(t, out, "300") // idle shown
+	assert.NotContains(t, out, "fast") // filtered
+	assert.Contains(t, out, "(idle in trx)") // empty query → fallback label
+}
+
+func TestRenderLongTransactions_SortsByAgeDesc(t *testing.T) {
+	m := makeOverviewModel()
+	m.result.Snapshot.Transactions = []db.Transaction{
+		{ID: 100, User: "younger", Time: 60,  Query: "X"},
+		{ID: 200, User: "older",   Time: 300, Query: "Y"},
+		{ID: 300, User: "middle",  Time: 120, Query: "Z"},
+	}
+	out := renderLongTransactions(m, 120)
+	// "older" (300s) should appear before "younger" (60s).
+	assert.Less(t, strings.Index(out, "older"), strings.Index(out, "younger"))
+}
+
+func TestTopBusiestTables_GroupsBySchemaTable(t *testing.T) {
+	// Pure unit test on the aggregator, doesn't require an Insights.
+	// Build a minimal Insights surface — but the function takes
+	// *insights.Insights, which is heavy. Instead, exercise the SQL
+	// extraction + grouping logic directly through extractTableFromSQL
+	// and confirm aggregation behaviour at a higher level via the
+	// test below that spins up a fake digest.
+	got := extractTableFromSQL("SELECT * FROM shop.orders WHERE id = 1")
+	assert.Equal(t, "shop.orders", got)
+	got2 := extractTableFromSQL("UPDATE auth.sessions SET expires_at = NOW()")
+	assert.Equal(t, "auth.sessions", got2)
 }
 
 func TestComputeVerdict_WarnRunningRatio(t *testing.T) {

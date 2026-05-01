@@ -31,16 +31,14 @@ Bonus: chrome `[cw]●` indicator wired in `internal/tui/views.go:cloudWatchIndi
 
 ## 4. Three-column top-N + bottom strip
 
-- [ ] 4.1 New `renderTopAASQueries(m, width)`: calls `insights.TopSQL` with `Window: 60*time.Second, Limit: 5`. Reuses the existing per-row format (AAS + digest text + ⚠ for no-index).
-- [ ] 4.2 New `renderTopAASUsers(m, width)`: calls `insights.LoadByGroup(GroupKeyUser, 60*time.Second)`. Reuses existing horizontal-bar rendering. Replaces the deleted Load-by-USER panel.
-- [ ] 4.3 New `renderTopBusiestTables(m, width)`: aggregates `Snapshot.Processes` by table (via existing `extractTableFromSQL`) plus digest stats. Renders `<schema.table>  <qps>` for the top-5. Activity-based, not contention-based.
-- [ ] 4.4 New `renderLongTransactions(m, width)`: filters `Snapshot.Transactions` where `Time >= 30s`, sorts desc by `Time`, top-5. Renders `<age>  pid <pid>  <user>  <query>`.
-- [ ] 4.5 Reorganise `renderOverviewMiddleBand` and `renderOverviewBottomBand` into:
-  - upper strip: 3 equal columns from §4.1-4.3 (joined via existing `joinHorizontal` + `padPanel`)
-  - lower strip: 2 columns — Long transactions (left) + Replication (right, conditional on replica role)
-- [ ] 4.6 Remove the old Load-by-USER panel + `(u/h/s)` cycle hint from `renderOverviewMiddleBand`.
-- [ ] 4.7 Repurpose `u`/`h`/`s` keys: in `handleOverviewKey`, set `m.topUser`/`m.topHost`/`m.topSchema` from the cursor row of the active top-N panel and switch to ViewTop. Footer hint updated.
-- [ ] 4.8 Snapshot tests in `internal/tui/overview_test.go` for the new layout: queries-panel rendering, users-panel, tables-panel, long-trx panel, replication-strip-collapse-when-standalone, no-CW vs with-CW verdict line.
+- [x] 4.1 `renderTopAASQueries` calls `insights.TopSQL` with `Window: overviewWindow (60s), Limit: 5, Sort: SortByAAS`. Renders `AAS X.XX  <digest>  no_idx` (when applicable).
+- [x] 4.2 `renderTopAASUsers` calls `insights.LoadByGroup(GroupKeyUser, 60s)`. Horizontal bars proportional to the highest AAS in the panel; cursor highlight on the focused row.
+- [x] 4.3 `renderTopBusiestTables` + `topBusiestTables` aggregator: walks digest activity over the 60s window, extracts table names via existing `extractTableFromSQL`, sums per-table AAS + calls/sec. Activity-based, distinct from the detector-issue-based aggregation in the Tables tab.
+- [x] 4.4 `renderLongTransactions` filters `Snapshot.Transactions` where `Time >= 30s`, sorts by Time desc, top-5. Empty query → `(idle in trx)` placeholder. Renders `<age> pid <pid> <user> <query>`.
+- [x] 4.5 `renderOverviewMiddleBand` rewritten to render the three top-N panels at equal widths. `renderOverviewBottomBand` rewritten as Long-trx + Replication strip; replication panel collapses cleanly on standalone servers and Long-trx widens to full width.
+- [x] 4.6 Removed `renderLoadPanel`, `renderHottestQueries`, `renderHottestTables`, `renderIssuesPanel`, `loadGroupingTitle` — all unreferenced after the layout swap.
+- [x] 4.7 `u/h/s` keys repurposed: `enter` and `u` drill into Top SQL with `m.topUser` set from the cursor row of the AAS Users panel. `h` and `s` jump straight to Top SQL (no filter); operators use Top SQL's own filters for per-host / per-schema breakdowns. Footer hint updated.
+- [x] 4.8 Snapshot tests rewritten: new-layout-panel-headers (positive + the obsolete-panel guards), graceful-messages-without-insights, long-trx-panel-empty, long-trx-filter-by-30s, long-trx-sort-by-age-desc, top-busiest-tables aggregation via extractTableFromSQL.
 
 ## 5. Docs / shipping
 

@@ -603,25 +603,16 @@ func (m Model) handleIssueDetailKey(key string) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// handleOverviewKey processes Overview-tab navigation. The selected
-// row lives in the Load-by-X panel; u/h/s cycle the grouping AND
-// reset the cursor so the user always lands on the top row of the
-// new dimension. enter drills into Top SQL with the matching filter.
+// handleOverviewKey processes Overview-tab navigation. The cursor
+// moves within the Top AAS users panel (the only top-N panel with a
+// selectable cursor in the new layout). j/k/g/G navigate; enter (or
+// `u`) drills into Top SQL filtered by the cursor user. h and s
+// remain bound — they jump to Top SQL too but without a filter,
+// preserving the muscle-memory "show me by host / by schema" while
+// the dedicated Top SQL tab handles the multi-dimension drill.
 func (m Model) handleOverviewKey(key string) (tea.Model, tea.Cmd) {
 	rows := m.overviewLoadRows()
 	switch key {
-	case "u":
-		m.loadGrouping = insights.GroupKeyUser
-		m.overviewCursor = 0
-		return m, nil
-	case "h":
-		m.loadGrouping = insights.GroupKeyHost
-		m.overviewCursor = 0
-		return m, nil
-	case "s":
-		m.loadGrouping = insights.GroupKeySchema
-		m.overviewCursor = 0
-		return m, nil
 	case "up", "k":
 		if m.overviewCursor > 0 {
 			m.overviewCursor--
@@ -640,37 +631,40 @@ func (m Model) handleOverviewKey(key string) (tea.Model, tea.Cmd) {
 			m.overviewCursor = len(rows) - 1
 		}
 		return m, nil
-	case "enter":
-		// Drill into Top SQL with the appropriate filter pre-set.
-		// Clear the other dimensions so the filter is unambiguous.
-		if m.overviewCursor >= len(rows) {
+	case "enter", "u":
+		// Drill into Top SQL with the user filter set from the
+		// cursor row. Clears any prior host/schema filter so the
+		// destination view shows a clean breakdown.
+		if m.overviewCursor >= len(rows) || m.insights == nil {
 			return m, nil
 		}
-		picked := rows[m.overviewCursor].Group
+		m.topUser = rows[m.overviewCursor].Group
+		m.topHost = ""
+		m.topSchema = ""
+		m.view = ViewTop
+		return m, nil
+	case "h", "s":
+		// The h/s grouping cycle from the prior layout has gone away,
+		// but we keep the keys functional: jump to Top SQL where the
+		// per-dimension breakdowns live. Operators retain "press
+		// h to look at hosts" as a one-stroke move.
+		if m.insights == nil {
+			return m, nil
+		}
 		m.topUser, m.topHost, m.topSchema = "", "", ""
-		switch m.loadGrouping {
-		case insights.GroupKeyUser:
-			m.topUser = picked
-		case insights.GroupKeyHost:
-			m.topHost = picked
-		case insights.GroupKeySchema:
-			m.topSchema = picked
-		}
-		if m.insights != nil {
-			m.view = ViewTop
-		}
+		m.view = ViewTop
 		return m, nil
 	}
 	return m, nil
 }
 
-// overviewLoadRows returns the Load-by-grouping panel rows for the
-// current loadGrouping. Returns nil when insights is unavailable.
+// overviewLoadRows returns the Top AAS users panel rows over the
+// Overview's 60s window. Returns nil when insights is unavailable.
 func (m Model) overviewLoadRows() []insights.GroupLoad {
 	if m.insights == nil || m.insights.Sessions == nil {
 		return nil
 	}
-	return insights.LoadByGroup(m.insights.Sessions, time.Now(), m.loadWindow, m.loadGrouping)
+	return insights.LoadByGroup(m.insights.Sessions, time.Now(), overviewWindow, insights.GroupKeyUser)
 }
 
 // handleTopKey processes keystrokes while the Top SQL panel is in

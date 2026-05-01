@@ -853,7 +853,7 @@ func renderStatusBar(m Model) string {
 
 	switch m.view {
 	case ViewOverview:
-		status += " | u/h/s:group j/k enter:drill I:issues B:tables L:lock t:top ?:help"
+		status += " | j/k:nav users  enter/u:drill user→Top SQL  h/s:Top SQL  I:issues B:tables M:mdl L:lock t:top ?:help"
 		return status
 	case ViewIssues:
 		if m.issuesTableFilter != "" {

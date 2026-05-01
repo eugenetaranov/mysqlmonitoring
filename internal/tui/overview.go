@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -242,95 +243,133 @@ func renderOverviewSparkline(m Model) string {
 	return " " + renderSparklineHeader(widthOr120(m.width)-2, m.sparkTrail, m.currentLoad)
 }
 
-// renderOverviewMiddleBand draws the three side-by-side panels:
-// Load-by-X, Replication, Live Issues. Width budget is split into
-// thirds; if Replication is absent (standalone server) the freed
-// width goes to the other two.
+// overviewWindow is the rolling window for the three top-N panels on
+// the Overview. 60 seconds keeps the panels reactive during incidents
+// — spikes that started a minute ago aren't averaged against an hour
+// of quiet baseline. Operators wanting longer windows use the
+// dedicated Top SQL tab (`t`).
+const overviewWindow = 60 * time.Second
+
+// renderOverviewMiddleBand draws three side-by-side top-N panels with
+// a 60s window: Top AAS queries, Top AAS users, Top busiest tables.
+// Equal widths; no conditional collapse — these three are always
+// available from the existing perf-insights collectors.
 func renderOverviewMiddleBand(m Model) string {
+	w := widthOr120(m.width)
+	gap := 2
+	col := (w - 2*gap - 2) / 3
+	colW := []int{col, col, w - 2 - 2*gap - col - col}
+
+	cols := []string{
+		padPanel(renderTopAASQueries(m, colW[0]), colW[0]),
+		padPanel(renderTopAASUsers(m, colW[1]), colW[1]),
+		padPanel(renderTopBusiestTables(m, colW[2]), colW[2]),
+	}
+	return joinHorizontal(cols, gap) + "\n"
+}
+
+// renderOverviewBottomBand draws Long Transactions + Replication.
+// Replication panel is removed entirely on standalone servers and the
+// Long Transactions panel widens to full width.
+func renderOverviewBottomBand(m Model) string {
 	hv := latestHealth(m)
 	hasReplica := hv != nil && hv.Replica != nil
 
 	w := widthOr120(m.width)
 	gap := 2
-	var loadW, replW, issuesW int
-	if hasReplica {
-		col := (w - 2*gap - 2) / 3
-		loadW, replW, issuesW = col, col, w-2-2*gap-loadW-replW
-	} else {
-		col := (w - gap - 2) / 2
-		loadW, issuesW = col, w-2-gap-loadW
+	if !hasReplica {
+		body := renderLongTransactions(m, w-2)
+		return padPanel(body, w-2) + "\n"
 	}
 
-	loadCol := renderLoadPanel(m, loadW)
-	issuesCol := renderIssuesPanel(m.result.Issues, m.result.Snapshot, 5, issuesW)
-
-	var cols []string
-	cols = append(cols, padPanel(loadCol, loadW))
-	if hasReplica {
-		cols = append(cols, padPanel(renderReplicationPanel(hv.Replica, replW), replW))
+	col := (w - gap - 2) / 2
+	leftW, rightW := col, w-2-gap-col
+	cols := []string{
+		padPanel(renderLongTransactions(m, leftW), leftW),
+		padPanel(renderReplicationPanel(hv.Replica, rightW), rightW),
 	}
-	cols = append(cols, padPanel(issuesCol, issuesW))
-
 	return joinHorizontal(cols, gap) + "\n"
 }
 
-// renderOverviewBottomBand draws Hottest Queries + Hottest Tables.
-func renderOverviewBottomBand(m Model) string {
-	w := widthOr120(m.width)
-	gap := 2
-	col := (w - gap - 2) / 2
-	left := renderHottestQueries(m, col)
-	right := renderHottestTables(m, col)
-	return joinHorizontal([]string{padPanel(left, col), padPanel(right, col)}, gap) + "\n"
+// renderTopAASQueries shows the top digests by AAS over the Overview
+// window (60s by default). Compact: AAS + truncated digest text +
+// no_idx flag when the digest scanned without an index.
+func renderTopAASQueries(m Model, width int) string {
+	var b strings.Builder
+	b.WriteString(headerStyle.Render("Top AAS queries (60s)"))
+	b.WriteString("\n")
+
+	if m.insights == nil {
+		b.WriteString(dimStyle.Render("  perf-insights disabled"))
+		return b.String()
+	}
+	if caps := m.insights.Capabilities(); !caps.DigestAvailable {
+		b.WriteString(dimStyle.Render("  performance_schema digest disabled"))
+		return b.String()
+	}
+	digests := insights.TopSQL(m.insights.Registry, m.insights.Sessions, time.Now(),
+		insights.TopSQLOptions{
+			Window: overviewWindow,
+			Limit:  5,
+			Sort:   insights.SortByAAS,
+		})
+	if len(digests) == 0 {
+		b.WriteString(dimStyle.Render("  gathering samples…"))
+		return b.String()
+	}
+	for _, d := range digests {
+		flag := ""
+		if d.NoIndexUsedCalls > 0 {
+			flag = warningStyle.Render(" no_idx")
+		}
+		room := width - 14
+		if room < 12 {
+			room = 12
+		}
+		b.WriteString(fmt.Sprintf("  AAS %5.2f  %s%s\n",
+			d.AAS, truncateStr(d.Text, room), flag))
+	}
+	return b.String()
 }
 
-// renderLoadPanel is the Load-by-USER/HOST/SCHEMA panel.
-func renderLoadPanel(m Model, width int) string {
+// renderTopAASUsers attributes load to MySQL users via LoadByGroup
+// over the 60s window. Renders horizontal bars proportional to the
+// highest AAS in the panel. The cursor on this panel drives the `u`
+// drill into Top SQL.
+func renderTopAASUsers(m Model, width int) string {
 	var b strings.Builder
-	title := loadGroupingTitle(m.loadGrouping)
-	b.WriteString(headerStyle.Render(title))
-	b.WriteString(dimStyle.Render("  (u/h/s)"))
+	b.WriteString(headerStyle.Render("Top AAS users (60s)"))
 	b.WriteString("\n")
 
 	if m.insights == nil || m.insights.Sessions == nil {
 		b.WriteString(dimStyle.Render("  load attribution unavailable"))
 		return b.String()
 	}
-	// performance_schema disabled / wait+session collectors won't
-	// run, so there will never be samples to attribute. Say so
-	// instead of letting the panel sit on "gathering samples…".
 	if caps := m.insights.Capabilities(); !caps.WaitsAvailable {
 		b.WriteString(dimStyle.Render("  performance_schema waits disabled"))
 		return b.String()
 	}
-
-	rows := m.overviewLoadRows()
+	rows := insights.LoadByGroup(m.insights.Sessions, time.Now(), overviewWindow, insights.GroupKeyUser)
 	if len(rows) == 0 {
 		b.WriteString(dimStyle.Render("  gathering samples…"))
 		return b.String()
 	}
-
-	// Cap to top 5 to keep the band compact.
 	const maxRows = 5
 	if len(rows) > maxRows {
 		rows = rows[:maxRows]
 	}
-
-	// Bar width: column width minus name (16) and number (6) and gap.
-	nameW := 16
+	nameW := 14
 	numW := 6
-	barW := width - nameW - numW - 4
+	barW := width - nameW - numW - 5
 	if barW < 4 {
 		barW = 4
 	}
-
 	maxAAS := 0.0
 	for _, r := range rows {
 		if r.AAS > maxAAS {
 			maxAAS = r.AAS
 		}
 	}
-
 	for i, r := range rows {
 		name := truncateStr(r.Group, nameW)
 		bar := renderHBar(r.AAS, maxAAS, barW)
@@ -343,6 +382,131 @@ func renderLoadPanel(m Model, width int) string {
 			b.WriteString(line)
 		}
 		b.WriteString("\n")
+	}
+	return b.String()
+}
+
+// renderTopBusiestTables aggregates digest activity over 60s by
+// extracting table names from each digest's SQL text. Activity-based
+// — distinct from the Tables tab which groups detector issues. Shows
+// the top-5 tables by total AAS over the window with calls/sec
+// alongside.
+func renderTopBusiestTables(m Model, width int) string {
+	var b strings.Builder
+	b.WriteString(headerStyle.Render("Top busiest tables (60s)"))
+	b.WriteString("\n")
+
+	if m.insights == nil {
+		b.WriteString(dimStyle.Render("  perf-insights disabled"))
+		return b.String()
+	}
+	if caps := m.insights.Capabilities(); !caps.DigestAvailable {
+		b.WriteString(dimStyle.Render("  performance_schema digest disabled"))
+		return b.String()
+	}
+
+	rows := topBusiestTables(m.insights, time.Now(), overviewWindow, 5)
+	if len(rows) == 0 {
+		b.WriteString(dimStyle.Render("  gathering samples…"))
+		return b.String()
+	}
+	nameW := width - 22
+	if nameW < 12 {
+		nameW = 12
+	}
+	for _, r := range rows {
+		b.WriteString(fmt.Sprintf("  %-*s  %5.2f AAS  %5s qps\n",
+			nameW, truncateStr(r.Name, nameW),
+			r.AAS, formatRate(r.CallsPerSec)))
+	}
+	return b.String()
+}
+
+// tableActivity is one row in the top-busiest-tables aggregation.
+type tableActivity struct {
+	Name        string  // schema.table or just table when unqualified
+	AAS         float64 // sum of digest AAS that reference this table
+	CallsPerSec float64
+}
+
+// topBusiestTables walks the digest aggregator over the supplied
+// window, extracts table names from each digest's SQL text, and sums
+// per-table totals. Pure in-memory — reuses the existing TopSQL API
+// rather than a new collection path.
+func topBusiestTables(ins *insights.Insights, now time.Time, window time.Duration, limit int) []tableActivity {
+	digests := insights.TopSQL(ins.Registry, ins.Sessions, now,
+		insights.TopSQLOptions{
+			Window: window,
+			Limit:  500, // pull all then re-rank by table
+			Sort:   insights.SortByAAS,
+		})
+	byTable := make(map[string]*tableActivity)
+	for _, d := range digests {
+		t := extractTableFromSQL(d.Text)
+		if t == "" {
+			continue
+		}
+		key := t
+		if d.Schema != "" && !strings.Contains(t, ".") {
+			key = d.Schema + "." + t
+		}
+		a, ok := byTable[key]
+		if !ok {
+			a = &tableActivity{Name: key}
+			byTable[key] = a
+		}
+		a.AAS += d.AAS
+		a.CallsPerSec += d.CallsPerSec
+	}
+	out := make([]tableActivity, 0, len(byTable))
+	for _, a := range byTable {
+		out = append(out, *a)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].AAS > out[j].AAS })
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return out
+}
+
+// renderLongTransactions surfaces the slowest open transactions to
+// catch the silent-wedger pattern (idle in transaction holding the
+// world). Filter ≥ 30s, sorted by Time desc, top-5.
+func renderLongTransactions(m Model, width int) string {
+	var b strings.Builder
+	b.WriteString(headerStyle.Render("Long transactions (≥30s)"))
+	b.WriteString("\n")
+
+	all := m.result.Snapshot.Transactions
+	rows := make([]db.Transaction, 0, len(all))
+	for _, t := range all {
+		if t.Time >= 30 {
+			rows = append(rows, t)
+		}
+	}
+	if len(rows) == 0 {
+		b.WriteString(dimStyle.Render("  none"))
+		return b.String()
+	}
+	sort.Slice(rows, func(i, j int) bool { return rows[i].Time > rows[j].Time })
+	if len(rows) > 5 {
+		rows = rows[:5]
+	}
+	queryW := width - 38
+	if queryW < 12 {
+		queryW = 12
+	}
+	for _, t := range rows {
+		age := humanDuration(t.Time * 1000)
+		userHost := truncateStr(t.User, 10)
+		query := strings.TrimSpace(t.Query)
+		if query == "" {
+			query = "(idle in trx)"
+		} else {
+			query = simplifyQuery(query)
+		}
+		b.WriteString(fmt.Sprintf("  %-7s pid %-6d %-10s %s\n",
+			age, t.ID, userHost, truncateStr(query, queryW)))
 	}
 	return b.String()
 }
@@ -387,134 +551,6 @@ func renderReplicationPanel(r *db.ReplicaStatus, width int) string {
 	if r.LastError != "" {
 		b.WriteString(criticalStyle.Render("  err: " + truncateStr(r.LastError, max(8, width-8))))
 		b.WriteString("\n")
-	}
-	return b.String()
-}
-
-// renderIssuesPanel is a compact issues block for the Overview's middle
-// band. Mirrors renderIssuesTable's selection / pagination but with a
-// fixed maxRows budget and minimal columns.
-func renderIssuesPanel(issues []detector.Issue, snap db.Snapshot, maxRows, width int) string {
-	rows := buildIssueRows(issues, snap)
-
-	var b strings.Builder
-	hdr := "Live issues"
-	if len(rows) > 0 {
-		hdr = fmt.Sprintf("Live issues (%d)", len(rows))
-	}
-	b.WriteString(headerStyle.Render(hdr))
-	b.WriteString("\n")
-
-	if len(rows) == 0 {
-		b.WriteString(dimStyle.Render("  System healthy."))
-		if dl := snap.InnoDBStatus.LatestDeadlock; dl != nil && dl.Timestamp != "" {
-			b.WriteString("\n")
-			b.WriteString(dimStyle.Render("  Last deadlock: " + dl.Timestamp))
-		}
-		return b.String()
-	}
-
-	shown := rows
-	if len(rows) > maxRows {
-		shown = rows[:maxRows]
-	}
-	for _, r := range shown {
-		badge := severityBadge(r.severity)
-		// Prefer the friendly kind label + query so the line reads
-		// like "long-trx UPDATE shop.orders ..." rather than just SQL.
-		text := r.kind
-		if r.query != "" {
-			text += " " + r.query
-		}
-		// Allow for 2-space indent + badge + space; severityBadge
-		// uses fixed-length tokens like [CRIT].
-		room := width - 9
-		if room < 8 {
-			room = 8
-		}
-		b.WriteString("  ")
-		b.WriteString(badge)
-		b.WriteString(" ")
-		b.WriteString(truncateStr(text, room))
-		b.WriteString("\n")
-	}
-	if len(rows) > maxRows {
-		b.WriteString(dimStyle.Render(fmt.Sprintf("  + %d more — press I", len(rows)-maxRows)))
-		b.WriteString("\n")
-	}
-	return b.String()
-}
-
-// renderHottestQueries shows the top digests by AAS in a compact form.
-// Drill is via the existing Top SQL view (press t).
-func renderHottestQueries(m Model, width int) string {
-	var b strings.Builder
-	b.WriteString(headerStyle.Render("Hottest queries (5m)"))
-	b.WriteString("\n")
-
-	if m.insights == nil {
-		b.WriteString(dimStyle.Render("  perf-insights disabled"))
-		return b.String()
-	}
-	if caps := m.insights.Capabilities(); !caps.DigestAvailable {
-		b.WriteString(dimStyle.Render("  performance_schema digest disabled"))
-		return b.String()
-	}
-	digests := insights.TopSQL(m.insights.Registry, m.insights.Sessions, time.Now(),
-		insights.TopSQLOptions{
-			Window: m.loadWindow,
-			Limit:  5,
-			Sort:   insights.SortByAAS,
-		})
-	if len(digests) == 0 {
-		b.WriteString(dimStyle.Render("  gathering samples…"))
-		return b.String()
-	}
-	for _, d := range digests {
-		flags := ""
-		if d.NoIndexUsedCalls > 0 {
-			flags = warningStyle.Render(" no_idx")
-		}
-		room := width - 18
-		if room < 12 {
-			room = 12
-		}
-		b.WriteString(fmt.Sprintf("  AAS %5.2f  %s%s\n",
-			d.AAS, truncateStr(d.Text, room), flags))
-	}
-	return b.String()
-}
-
-// renderHottestTables aggregates issue rows by table name. Reuses
-// buildTableRows from the existing Tables view to stay consistent.
-func renderHottestTables(m Model, width int) string {
-	var b strings.Builder
-	b.WriteString(headerStyle.Render("Hottest tables"))
-	b.WriteString(dimStyle.Render("  (M for MDL queue)"))
-	b.WriteString("\n")
-
-	rows := buildTableRows(m.result.Issues, m.result.Snapshot)
-	if len(rows) == 0 {
-		b.WriteString(dimStyle.Render("  no contention"))
-		return b.String()
-	}
-	const maxRows = 5
-	if len(rows) > maxRows {
-		rows = rows[:maxRows]
-	}
-	for _, r := range rows {
-		flag := ""
-		if r.maxSev >= detector.SeverityCritical {
-			flag = criticalStyle.Render(" ⚠")
-		} else if r.maxSev >= detector.SeverityWarning {
-			flag = warningStyle.Render(" ⚠")
-		}
-		room := width - 22
-		if room < 12 {
-			room = 12
-		}
-		b.WriteString(fmt.Sprintf("  %s  iss %-3d pids %-3d%s\n",
-			truncateStr(r.name, room), r.issueCount, len(r.pids), flag))
 	}
 	return b.String()
 }
@@ -627,17 +663,6 @@ func boolStr(b bool) string {
 		return "Yes"
 	}
 	return "No"
-}
-
-func loadGroupingTitle(k insights.GroupKey) string {
-	switch k {
-	case insights.GroupKeyHost:
-		return "Load by HOST (5m)"
-	case insights.GroupKeySchema:
-		return "Load by SCHEMA (5m)"
-	default:
-		return "Load by USER (5m)"
-	}
 }
 
 // renderHBar produces a horizontal bar of length width. The filled
