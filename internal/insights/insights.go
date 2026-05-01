@@ -73,22 +73,24 @@ type Insights struct {
 	cfg Config
 	src Source
 
-	Registry *series.Registry
-	Waits    *collector.WaitSeries
-	Sessions *series.RingSink[series.SessionSample]
-	Health   *collector.HealthCollector
+	Registry   *series.Registry
+	Waits      *collector.WaitSeries
+	Sessions   *series.RingSink[series.SessionSample]
+	Health     *collector.HealthCollector
+	CloudWatch *collector.CloudWatchCollector
 
 	digest *collector.DigestCollector
 	waits  *collector.WaitCollector
 	cpu    *collector.CPUSampler
 
-	mu           sync.Mutex
-	caps         db.PerfCapabilities
-	probed       bool
-	digestErrors uint64
-	waitErrors   uint64
-	cpuErrors    uint64
-	healthErrors uint64
+	mu                sync.Mutex
+	caps              db.PerfCapabilities
+	probed            bool
+	digestErrors      uint64
+	waitErrors        uint64
+	cpuErrors         uint64
+	healthErrors      uint64
+	cloudWatchErrors  uint64
 }
 
 // New constructs an Insights with cfg and source. The series and
@@ -176,6 +178,19 @@ func (i *Insights) Capabilities() db.PerfCapabilities {
 	return i.caps
 }
 
+// AttachCloudWatch wires a CloudWatch collector into Insights. Must be
+// called before Run; safe to call with a non-Available probe (the
+// collector will short-circuit Poll). Passing nil is a no-op so
+// callers can pass through unconditionally.
+func (i *Insights) AttachCloudWatch(c *collector.CloudWatchCollector) {
+	if c == nil {
+		return
+	}
+	i.mu.Lock()
+	i.CloudWatch = c
+	i.mu.Unlock()
+}
+
 // Run launches the digest, wait and CPU collectors as goroutines and
 // blocks until ctx is cancelled. Errors from individual polls are
 // counted but never abort Run — perf insights is best-effort, and a
@@ -215,7 +230,53 @@ func (i *Insights) Run(ctx context.Context) {
 		i.runHealthLoop(ctx)
 	}()
 
+	// CloudWatch loop runs only when an Available probe attached. The
+	// collector itself short-circuits Poll on a non-Available probe,
+	// but skipping the goroutine entirely keeps the sleeping idle path
+	// at zero overhead for self-managed MySQL.
+	if i.CloudWatch != nil && i.CloudWatch.Probe().Available {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			i.runCloudWatchLoop(ctx)
+		}()
+	}
+
 	wg.Wait()
+}
+
+// runCloudWatchLoop polls the CloudWatch collector at a fixed 60s
+// cadence (matching CloudWatch's default 60s metric resolution; faster
+// than that triggers high-resolution pricing on the AWS side).
+func (i *Insights) runCloudWatchLoop(ctx context.Context) {
+	const cwInterval = 60 * time.Second
+	t := time.NewTicker(cwInterval)
+	defer t.Stop()
+	// Bound the per-call AWS round-trip so a stuck CloudWatch endpoint
+	// never blocks shutdown. Two-second timeout is generous for a
+	// single GetMetricData with ~10 metrics.
+	cwCtx := func(parent context.Context) (context.Context, context.CancelFunc) {
+		return context.WithTimeout(parent, 5*time.Second)
+	}
+
+	c, cancel := cwCtx(ctx)
+	if _, err := i.CloudWatch.Poll(c); err != nil {
+		i.bumpErr(&i.cloudWatchErrors)
+	}
+	cancel()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			c, cancel := cwCtx(ctx)
+			if _, err := i.CloudWatch.Poll(c); err != nil {
+				i.bumpErr(&i.cloudWatchErrors)
+			}
+			cancel()
+		}
+	}
 }
 
 // pollWithTimeout runs fn with a fresh per-call deadline derived from
@@ -329,19 +390,21 @@ func (i *Insights) bumpErr(n *uint64) {
 
 // ErrorCounts returns the cumulative error counts across collectors.
 type ErrorCounts struct {
-	Digest uint64
-	Wait   uint64
-	CPU    uint64
-	Health uint64
+	Digest     uint64
+	Wait       uint64
+	CPU        uint64
+	Health     uint64
+	CloudWatch uint64
 }
 
 func (i *Insights) ErrorCounts() ErrorCounts {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	return ErrorCounts{
-		Digest: i.digestErrors,
-		Wait:   i.waitErrors,
-		CPU:    i.cpuErrors,
-		Health: i.healthErrors,
+		Digest:     i.digestErrors,
+		Wait:       i.waitErrors,
+		CPU:        i.cpuErrors,
+		Health:     i.healthErrors,
+		CloudWatch: i.cloudWatchErrors,
 	}
 }

@@ -7,17 +7,20 @@
 
 ## 2. CloudWatch collector
 
-- [ ] 2.1 Add `aws-sdk-go-v2` + `aws-sdk-go-v2/service/cloudwatch` modules to `go.mod`.
-- [ ] 2.2 New `internal/collector/cloudwatch.go`:
-  - `CWMetrics` struct (CPUPct, FreeableBytes, ReadIOPS, WriteIOPS, ReadLatency, WriteLatency, DiskQueueDepth, DBLoad family, AuroraReplicaLag, ReplicaLag, Time).
-  - `CloudWatchSource` interface (`GetMetricData(ctx, instanceID, region) (CWMetrics, error)`).
-  - `CloudWatchCollector` mirroring `HealthCollector` shape: caches probe (region + instanceID), polls every 60s, exposes `Latest()`.
-  - `ProbeCloudWatch(ctx, host, regionFlag, instanceFlag)` returns `(region, instanceID, available bool, err)`. Hostname-parse for RDS / Aurora cluster / Aurora reader patterns; explicit flags win.
-  - SDK default credential chain check: a single `aws.Config.Credentials.Retrieve(ctx)` at probe time. If retrieval errors, `available=false` and a typed reason is returned for the startup notice.
-- [ ] 2.3 Add `--aws-region` and `--rds-instance` flags in `cmd/mysqlmonitoring/main.go` (both optional, both default empty for hostname-parse path).
-- [ ] 2.4 Wire `runCloudWatchLoop` into `internal/insights/insights.go` next to `runHealthLoop`. Loop only starts when probe.available=true. 60s ticker. Errors counted into `ErrorCounts.CloudWatch`.
-- [ ] 2.5 Plumb `CWMetrics` into the existing `db.HealthVitals.CloudWatch *CWMetrics` (new field) so the consumer reads from one place. `HealthCollector` stays unchanged; the merge happens in `Insights` exposing both via a single accessor.
-- [ ] 2.6 Tests: collector unit tests with a fake `CloudWatchSource` (probe success / failure paths, counter-resets, region/instance parsing, Aurora-vs-RDS pattern matching).
+- [x] 2.1 Added `aws-sdk-go-v2/config` and `aws-sdk-go-v2/service/cloudwatch` to `go.mod`.
+- [x] 2.2 New `internal/collector/cloudwatch.go`:
+  - `CWMetrics` struct with all required fields.
+  - `CloudWatchSource` interface (`GetMetricData(ctx, instanceID, isAurora) (CWMetrics, error)`).
+  - `CloudWatchCollector` mirroring `HealthCollector`: caches probe, exposes `Latest()`/`Probe()`, short-circuits Poll when probe is non-Available so the call is safe even when CW is disabled.
+  - `ProbeCloudWatch` does the credential resolution; `resolveTarget` (pure) handles hostname / flag parsing so unit tests don't trigger SDK calls.
+  - Hostname regex matches both RDS instance endpoints (`<id>.<rand>.<region>.rds.amazonaws.com`) and Aurora cluster endpoints (cluster / cluster-ro variants share the same trailing region pattern).
+  - `AWSCloudWatchSource` is the production source; one `GetMetricData` per Poll covers all metrics including conditional Aurora-only ones.
+- [x] 2.3 `--aws-region` and `--rds-instance` flags in `cmd/mysqlmonitoring/main.go`. Both optional. New `extractHostFromDSN` helper feeds the hostname-parse path.
+- [x] 2.4 Wired `runCloudWatchLoop` into `internal/insights/insights.go`. Loop starts only when `CloudWatch != nil && Probe.Available`. Per-poll context timeout 5s so a stuck CW endpoint never blocks shutdown.
+- [x] 2.5 `Insights.AttachCloudWatch` setter so the collector is wired post-`New` (the AWS source needs the resolved region from the probe). `ErrorCounts.CloudWatch` exposed.
+- [x] 2.6 9 unit tests covering: not-RDS-disables, hostname parse for RDS / Aurora-cluster / Aurora-reader, explicit-flags-beat-hostname, partial-flags-fill-from-host, non-RDS-hostname-fails, Poll short-circuit when unavailable, first-poll, Aurora flag propagation, error-leaves-cache-intact, secondsToDuration helper.
+
+Bonus: chrome `[cw]●` indicator wired in `internal/tui/views.go:cloudWatchIndicator` — bright green dot when a sample exists, dim circle when configured but no sample yet, absent when no CW context.
 
 ## 3. Verdict line: CW fields
 

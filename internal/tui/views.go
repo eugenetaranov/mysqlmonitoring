@@ -580,13 +580,23 @@ func humanUptime(d time.Duration) string {
 
 // cloudWatchIndicator returns "[cw]●" (bright) when CloudWatch has
 // produced at least one sample, "[cw]○" (dim) when configured but
-// no sample yet, or "" when no CW context exists. Phase 2 will wire
-// the Has* logic; Phase 1 returns "" so the indicator is invisible
-// until the collector lands.
+// no sample yet, or "" when no CW context exists.
 func cloudWatchIndicator(m Model) string {
-	// Placeholder — Phase 2 (CloudWatch collector) will populate
-	// this from m.insights.CloudWatch.Latest()/Capabilities().
-	return ""
+	if m.insights == nil || m.insights.CloudWatch == nil {
+		return ""
+	}
+	probe := m.insights.CloudWatch.Probe()
+	if !probe.Available {
+		return ""
+	}
+	latest := m.insights.CloudWatch.Latest()
+	if latest.Time.IsZero() {
+		// Configured, no sample yet — dim circle.
+		return "[cw]" + dimStyle.Render("○")
+	}
+	// Bright dot reuses okStyle (green) so the "good" affordance is
+	// consistent with the [HEALTHY] verdict.
+	return "[cw]" + okStyle().Render("●")
 }
 
 func renderFooter(m Model) string {

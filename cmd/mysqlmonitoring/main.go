@@ -15,6 +15,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/eugenetaranov/mysqlmonitoring/internal/collector"
 	"github.com/eugenetaranov/mysqlmonitoring/internal/db"
 	"github.com/eugenetaranov/mysqlmonitoring/internal/detector"
 	"github.com/eugenetaranov/mysqlmonitoring/internal/explain"
@@ -52,6 +53,12 @@ type flags struct {
 	perfWindow          int // seconds
 	perfMaxDigests      int
 	perfCPUSampleMillis int
+
+	// CloudWatch flags. Both optional; the collector falls back to
+	// hostname-parse when either is empty. The whole collector is
+	// silent when no AWS credentials resolve through the SDK chain.
+	awsRegion   string
+	rdsInstance string
 }
 
 func main() {
@@ -93,6 +100,8 @@ func main() {
 	monitorCmd.Flags().IntVar(&f.perfWindow, "perf-window", 3600, "Perf-insights in-memory retention window in seconds")
 	monitorCmd.Flags().IntVar(&f.perfMaxDigests, "perf-max-digests", 2000, "Maximum number of distinct digests held in memory")
 	monitorCmd.Flags().IntVar(&f.perfCPUSampleMillis, "perf-cpu-sample-ms", 1000, "CPU AAS sampling interval in milliseconds")
+	monitorCmd.Flags().StringVar(&f.awsRegion, "aws-region", "", "AWS region for CloudWatch RDS metrics (default: parse from RDS hostname)")
+	monitorCmd.Flags().StringVar(&f.rdsInstance, "rds-instance", "", "RDS instance identifier for CloudWatch (default: parse from hostname)")
 
 	statusCmd := &cobra.Command{
 		Use:   "status",
@@ -247,6 +256,33 @@ func sessionLogFile(host string, now time.Time) string {
 }
 
 // sanitizeHost replaces filesystem-unfriendly characters with '_'.
+// extractHostFromDSN pulls the hostname out of a go-sql-driver DSN
+// like "user:pass@tcp(host:port)/db?…" or a "mysql://…" URI. Used by
+// the CloudWatch probe to recognise an RDS hostname pattern. Returns
+// the empty string when no match is found; the probe handles that.
+func extractHostFromDSN(dsn string) string {
+	if dsn == "" {
+		return ""
+	}
+	if i := strings.Index(dsn, "@tcp("); i >= 0 {
+		rest := dsn[i+len("@tcp("):]
+		if j := strings.IndexAny(rest, ":)"); j >= 0 {
+			return strings.TrimSpace(rest[:j])
+		}
+	}
+	if strings.HasPrefix(dsn, "mysql://") {
+		rest := strings.TrimPrefix(dsn, "mysql://")
+		if i := strings.LastIndex(rest, "@"); i >= 0 {
+			rest = rest[i+1:]
+		}
+		if i := strings.IndexAny(rest, ":/"); i >= 0 {
+			rest = rest[:i]
+		}
+		return rest
+	}
+	return ""
+}
+
 func sanitizeHost(host string) string {
 	if host == "" {
 		return "unknown-host"
@@ -325,6 +361,29 @@ func runMonitor(f flags, cmd *cobra.Command) error {
 			fmt.Fprintf(os.Stderr, "perf-insights probe failed: %v\n", err)
 		}
 	}
+
+	// CloudWatch RDS metrics. Probed once at startup; if the probe is
+	// not Available (not RDS, no AWS credentials, hostname doesn't
+	// parse) the loop never starts. The probe Reason is surfaced to
+	// stderr exactly once so the operator knows whether to expect CW
+	// fields in the verdict line.
+	probeHost := extractHostFromDSN(buildDSN(f, cmd))
+	srvInfo, _ := database.ServerInfo(ctx)
+	cwProbe := collector.ProbeCloudWatch(ctx, probeHost, f.awsRegion, f.rdsInstance,
+		srvInfo.IsRDS, srvInfo.IsAurora)
+	if cwProbe.Available {
+		cwSrc, err := collector.NewAWSCloudWatchSource(ctx, cwProbe.Region)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "cloudwatch source: %v\n", err)
+		} else {
+			ins.AttachCloudWatch(collector.NewCloudWatchCollector(cwSrc, cwProbe))
+			fmt.Fprintf(os.Stderr, "CloudWatch metrics enabled (region=%s instance=%s)\n",
+				cwProbe.Region, cwProbe.InstanceID)
+		}
+	} else if (srvInfo.IsRDS || srvInfo.IsAurora) && cwProbe.Reason != "" {
+		fmt.Fprintf(os.Stderr, "CloudWatch metrics: %s\n", cwProbe.Reason)
+	}
+
 	go ins.Run(ctx)
 
 	var explainEngine *explain.Engine
