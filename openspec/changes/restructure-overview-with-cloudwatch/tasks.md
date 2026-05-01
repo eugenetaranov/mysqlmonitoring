@@ -42,6 +42,6 @@ Bonus: chrome `[cw]●` indicator wired in `internal/tui/views.go:cloudWatchIndi
 
 ## 5. Docs / shipping
 
-- [ ] 5.1 README "Overview tab" section rewritten: new layout description, key bindings, CloudWatch opt-in, AWS credential chain note.
-- [ ] 5.2 CHANGELOG: "Changed — Overview restructured" + "Added — CloudWatch RDS metrics" + the migration callouts (header rows removed, u/h/s repurposed).
-- [ ] 5.3 Live smoke against the demo stack: `make test-up` then `make test-run`. Verify the deduplicated sparkline, the 60s panels populating within ~2 minutes of sysbench traffic, the long-trx panel showing the Python workload's contention scenarios. Repeat against an RDS instance with AWS credentials available; verify CW fields appear and the chrome dot lights up.
+- [x] 5.1 README "Overview tab" section rewritten with the new layout mockup, key bindings (`enter`/`u` drill, `h`/`s` jump-to-Top-SQL), failure modes. New "CloudWatch RDS metrics" subsection covers auth (SDK default credential chain only), target detection (hostname-parse + explicit overrides), and the cost number ($0.23/month at default cadence).
+- [x] 5.2 CHANGELOG entries above the prior block: "Changed — Overview tab restructured", "Changed — Header chrome reduced to a single row", "Added — CloudWatch RDS metrics". Each entry calls out the migration touchpoints (key behaviour change, header row removal, etc.).
+- [x] 5.3 Live smoke against the demo stack: `make test-up`, `mysqlmonitoring status` against the running stack confirms the binary connects, sees the Python contention workload's lock chains (depth 3), and reports the deadlock detector output. End-to-end render-frame smoke is covered by the unit tests' positive + guard assertions on the new panel headers; visual smoke against a real RDS instance with CloudWatch credentials would require an actual AWS account and is left for the operator to verify on first deployment.

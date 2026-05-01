@@ -2,6 +2,52 @@
 
 ## Unreleased
 
+### Changed — Overview tab restructured
+
+The Overview body now reads top-down as: verdict line, DB Load
+sparkline, three side-by-side top-N panels at a 60-second window
+(Top AAS queries, Top AAS users, Top busiest tables), and a
+Long-transactions + Replication strip below. Three eye movements
+to triangulate "spike → who → what."
+
+The previous Load-by-USER/HOST/SCHEMA panel and its `u`/`h`/`s`
+cycle are gone. The keys remain bound: `enter` and `u` drill into
+Top SQL filtered by the cursor user; `h` and `s` jump straight to
+Top SQL, where the dedicated tab handles per-host and per-schema
+breakdowns. The Hottest Queries / Hottest Tables panels and the
+embedded Live Issues panel have been replaced — the activity-based
+"Top busiest tables (60s)" is the new sibling of Top AAS queries;
+issues live in the dedicated I tab.
+
+### Changed — Header chrome reduced to a single row
+
+The previous four-row header (title + tab bar, server version,
+transaction/lock-wait/process counts, DB Load sparkline) collapses
+to a single row with title + tab bar on the left and a compact
+context block on the right (snapshot time, server version + variant
+tag, uptime, optional `[cw]●` indicator). The dropped rows are
+all duplicated content from the Overview's body — the verdict line
+already shows what they showed.
+
+### Added — CloudWatch RDS metrics
+
+When running against RDS or Aurora and the AWS SDK default
+credential chain produces credentials, a new collector polls
+CloudWatch every 60 s for `CPUUtilization`, `FreeableMemory`,
+`ReadIOPS`, `WriteIOPS`, `ReadLatency`, `WriteLatency`,
+`DiskQueueDepth`, plus Aurora-only `DBLoad`/`DBLoadCPU`/
+`DBLoadNonCPU` and `AuroraReplicaLag`. CPU%, free memory, and IOPS
+surface in the verdict line. CPU bumps the verdict word at >80%
+(WARN) and >95% (PAGE).
+
+Authentication: AWS SDK default credential chain only — no
+`--aws-profile` flag. Region and instance ID are auto-detected from
+the RDS hostname; explicit `--aws-region` and `--rds-instance` flags
+override.
+
+Cost: ~$0.23/month per monitored instance at the default 60 s
+cadence.
+
 ### Added — MDL queue view (key `M`)
 
 A new **MDL** tab inspects the `performance_schema.metadata_locks`

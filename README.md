@@ -103,35 +103,100 @@ come from `events_waits_summary_global_by_event_name`.
 ### Overview tab (default)
 
 The TUI opens on the **Overview** tab, designed for the 3am triage
-question: "is the database OK?" One screen, one frame. Keys:
+question: "is the database OK?" One screen, one frame.
 
-- `O` — back to Overview from anywhere
-- `u` / `h` / `s` — cycle the Load panel between user / host / schema
-- `enter` — drill into Top SQL filtered by the selected user/host/schema
-- `I` / `B` / `L` / `t` — Issues / Tables / Lock chains / Top SQL
+```
+MySQL Lock Monitor   [O Overview][I Issues][B Tables][M MDL][L Lock][t Top SQL]   10:42:13 · 8.0.45 RDS · up 14d · [cw]●
+─────────────────────────────────────────────────────────────────────────────────────────
+ [HEALTHY] CPU 34%  Mem 14.2GB free  IOPS 1.2k/450  AAS 1.8/8c  running 3/512
+           bp_hit 99%  HLL 12k  repl +0s  dl 0
+ DB Load ▁▂▂▃▄▅▆▇  CPU 1.1  IO 0.4  Lock 0.0  Σ 1.5
+─────────────────────────────────────────────────────────────────────────────────────────
+ Top AAS queries (60s)   Top AAS users (60s)         Top busiest tables (60s)
+ AAS 4.2 select_orders   app_rw      ████ 8.4        shop.orders   2.1 AAS  2.1k qps
+ AAS 1.8 update_items    reports     ██   1.6        shop.items    1.4 AAS    980 qps
+ AAS 1.4 analytics_roll  app_ro      █    1.1        auth.sessions 0.8 AAS    640 qps
+─────────────────────────────────────────────────────────────────────────────────────────
+ Long transactions (≥30s)                       Replication
+ 3m12s  pid 8821  app_rw  ALTER orders          source=db-01  IO=Y SQL=Y
+ 2m04s  pid 8714  cron    sweep_old             lag 0s  GTID gap 0
+ 1m45s  pid 8717  cron    (idle in trx)
+```
+
+Three eye movements: verdict line for *what's spiking*, three top-N
+panels for *who's running it and where it's landing*, Long-trx +
+Replication strip for *what's stuck*.
+
+Keys:
+
+- `O` — back to Overview from anywhere.
+- `j` / `k` / `g` / `G` — navigate the Top AAS users cursor.
+- `enter` or `u` — drill into Top SQL filtered by the cursor user.
+- `h` / `s` — jump to Top SQL (use Top SQL's own filters there for
+  per-host / per-schema breakdowns).
+- `I` / `B` / `L` / `M` / `t` — Issues / Tables / Lock chains /
+  MDL queue / Top SQL.
 
 The view contains:
 
+- a **chrome bar** with snapshot time, server version + variant tag,
+  uptime, and a `[cw]●` indicator that lights up when CloudWatch
+  metrics are wired and producing samples.
 - a **status verdict line** — `[HEALTHY]` / `[WARN]` / `[PAGE]` paired
-  with colour, plus key gauges (uptime, AAS over vCPUs, threads
-  running, buffer-pool hit rate, InnoDB History List Length, replica
-  lag, deadlock count). Word + colour are paired so screenshots and
-  colorblind operators don't lose severity.
+  with colour. When `--aws-region` (or hostname-parse) resolves an
+  RDS / Aurora target and AWS credentials are present, the leftmost
+  cluster shows host CPU%, free memory, IOPS r/w, and (Aurora-only)
+  DBLoad. MySQL-side gauges (AAS, threads_running, bp_hit, HLL,
+  replica lag, deadlock count) follow.
 - the **DB-load sparkline** by wait class (CPU / IO / Lock / Sync /
-  Network), reused from the perf-insights infrastructure.
-- a **Load by USER/HOST/SCHEMA** panel — top-N attribution from
-  in-memory session samples.
+  Network), rendered exactly once.
+- three **top-N panels at a 60-second window**:
+  - *Top AAS queries* — digests ranked by AAS, with a `no_idx` flag
+    when the digest scanned without an index.
+  - *Top AAS users* — MySQL users ranked by AAS with horizontal
+    bars; cursor lives here.
+  - *Top busiest tables* — schema.table ranked by AAS over the
+    window, with calls/sec alongside. Activity-based, distinct
+    from the detector-contention view in the Tables tab.
+- a **Long transactions** strip (≥30 s) showing the slowest open
+  transactions sorted desc — catches the silent "idle in
+  transaction" wedger.
 - a **Replication** panel showing source, IO/SQL thread state, lag,
-  GTID gap. Removed entirely on standalone servers (not greyed —
-  surrounding panels reflow).
-- a compact **Live Issues** panel summarising detector output.
-- **Hottest Queries** (by AAS over the window) and **Hottest Tables**
-  (by issue count + worst severity).
+  GTID gap. Removed entirely on standalone servers; Long-trx
+  widens to full width.
 
-The status line, replication panel, and live issues work without
-`--enable-perf-insights`; the AAS sparkline and load attribution
-need `performance_schema` enabled and panels self-describe their
+The verdict line, replication panel, and long-trx panel work without
+`--enable-perf-insights`; the AAS sparkline and the three top-N
+panels need `performance_schema` enabled and self-describe their
 state when those data sources are missing.
+
+### CloudWatch RDS metrics
+
+When `mysqlmonitoring monitor` runs against an RDS or Aurora
+instance and the AWS SDK default credential chain produces
+credentials, a separate collector polls CloudWatch every 60 s for
+`CPUUtilization`, `FreeableMemory`, `ReadIOPS`, `WriteIOPS`,
+`ReadLatency`, `WriteLatency`, `DiskQueueDepth`, plus Aurora-only
+`DBLoad` family and replication lag. The fields surface in the
+verdict line; the chrome `[cw]●` indicator lights up green when at
+least one sample has landed.
+
+```bash
+# Hostname parse (works for *.rds.amazonaws.com endpoints):
+mysqlmonitoring monitor --host prod-orders.abc.us-east-1.rds.amazonaws.com ...
+
+# Explicit overrides for unusual DNS configurations:
+mysqlmonitoring monitor --aws-region us-east-1 --rds-instance prod-orders ...
+```
+
+No `--aws-profile` flag — the SDK default credential chain is the
+contract (env vars, `~/.aws/credentials`, IAM instance role, EKS
+service account). When no credentials resolve, the collector logs a
+single startup notice and the CW fields don't render.
+
+Cost: ~$0.23/month per monitored instance at the default 60 s
+cadence (10 metrics × 1440 polls/day × CloudWatch GetMetricData
+pricing).
 
 ### MDL queue (key `M`)
 
