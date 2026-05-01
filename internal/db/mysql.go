@@ -395,6 +395,7 @@ func (m *MySQLDB) KillConnection(ctx context.Context, id uint64) error {
 // every health-collector poll. Pulled together in a single WHERE-IN
 // query so the cost is one round-trip per poll.
 var healthVitalNames = []string{
+	"Uptime",
 	"Threads_running",
 	"Threads_connected",
 	"Innodb_buffer_pool_pages_dirty",
@@ -437,6 +438,8 @@ func (m *MySQLDB) HealthVitals(ctx context.Context, probe ReplicaProbe, priorAbo
 		}
 		n, _ := strconv.ParseUint(value, 10, 64)
 		switch name {
+		case "Uptime":
+			v.UptimeSeconds = n
 		case "Threads_running":
 			v.ThreadsRunning = n
 		case "Threads_connected":

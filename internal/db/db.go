@@ -122,6 +122,7 @@ type ServerInfo struct {
 // Replica is nil on standalone servers — Probe detects role once.
 type HealthVitals struct {
 	Time                          time.Time
+	UptimeSeconds                 uint64 // SHOW GLOBAL STATUS Uptime
 	ThreadsRunning                uint64
 	ThreadsConnected              uint64
 	InnoDBBufferPoolPagesDirty    uint64

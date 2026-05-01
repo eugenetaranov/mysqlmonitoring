@@ -7,6 +7,8 @@ import (
 	"strings"
 	"time"
 
+	"charm.land/lipgloss/v2"
+
 	"github.com/eugenetaranov/mysqlmonitoring/internal/db"
 	"github.com/eugenetaranov/mysqlmonitoring/internal/detector"
 )
@@ -456,46 +458,135 @@ func buildTreeEntries(lockWaits []db.LockWait, snapshot db.Snapshot) []treeEntry
 	return entries
 }
 
+// renderHeader produces the one-row chrome at the top of every view:
+// title + tab bar on the left, compact context on the right (snapshot
+// time, server version with variant tag, uptime, and an optional [cw]
+// indicator when CloudWatch metrics are wired). The Server / counts /
+// DB Load rows that lived here historically have moved into each
+// view's body — the header is now strictly chrome, no data.
 func renderHeader(m Model) string {
 	var b strings.Builder
-	snap := m.result.Snapshot
 
-	// Title row + tab bar on the same band so the "chrome" is one
-	// clear visual block before the data starts.
-	b.WriteString(titleStyle.Render("MySQL Lock Monitor"))
+	left := titleStyle.Render("MySQL Lock Monitor") + " " + renderTabBar(m)
+	right := renderHeaderContext(m)
+
+	if m.width <= 0 {
+		// Pre-WindowSizeMsg path (very early frames or tests): fall
+		// back to a stacked layout instead of guessing widths.
+		b.WriteString(left)
+		if right != "" {
+			b.WriteString("\n")
+			b.WriteString(right)
+		}
+	} else {
+		leftW := lipgloss.Width(left)
+		rightW := lipgloss.Width(right)
+		gap := m.width - leftW - rightW
+		if gap < 1 {
+			gap = 1
+		}
+		b.WriteString(left)
+		b.WriteString(strings.Repeat(" ", gap))
+		b.WriteString(right)
+	}
 	b.WriteString("\n")
-	b.WriteString(renderTabBar(m))
-	b.WriteString("\n\n")
+	b.WriteString(strings.Repeat("─", widthOr120(m.width)))
+	b.WriteString("\n")
+	return b.String()
+}
 
+// renderHeaderContext is the right-aligned compact line: time · version
+// + variant · uptime · [cw] indicator. Each segment is suppressed when
+// its data isn't available — operator never sees empty separators.
+func renderHeaderContext(m Model) string {
+	snap := m.result.Snapshot
+	var parts []string
+
+	if !snap.Time.IsZero() {
+		parts = append(parts, snap.Time.Format("15:04:05"))
+	}
 	if snap.ServerInfo.Version != "" {
-		b.WriteString(headerStyle.Render("Server: "))
-		b.WriteString(snap.ServerInfo.Version)
+		v := compactVersion(snap.ServerInfo.Version)
 		if snap.ServerInfo.IsMariaDB {
-			b.WriteString(" (MariaDB)")
+			v += " MariaDB"
 		}
 		if snap.ServerInfo.IsAurora {
-			b.WriteString(" (Aurora)")
+			v += " Aurora"
 		} else if snap.ServerInfo.IsRDS {
-			b.WriteString(" (RDS)")
+			v += " RDS"
 		}
-		b.WriteString("\n")
+		parts = append(parts, v)
+	}
+	if uptime := serverUptime(m); uptime > 0 {
+		parts = append(parts, "up "+humanUptime(uptime))
+	}
+	if cw := cloudWatchIndicator(m); cw != "" {
+		parts = append(parts, cw)
 	}
 
-	b.WriteString(fmt.Sprintf("Transactions: %d | Lock Waits: %d | Processes: %d\n",
-		len(snap.Transactions), len(snap.LockWaits), len(snap.Processes)))
-
-	// Perf-insights sparkline header — only shown when insights is
-	// wired AND has at least one wait sample, so the lock-monitor
-	// experience is unchanged when the feature is off.
-	if m.insights != nil && len(m.sparkTrail) > 0 {
-		b.WriteString(renderSparklineHeader(m.width, m.sparkTrail, m.currentLoad))
-		b.WriteString("\n")
+	if len(parts) == 0 {
+		return ""
 	}
+	return dimStyle.Render(strings.Join(parts, " · "))
+}
 
-	b.WriteString(strings.Repeat("─", min(60, m.width)))
-	b.WriteString("\n\n")
+// compactVersion strips the build suffix MySQL adds (e.g. "8.0.45-0ubuntu0…")
+// to keep the chrome tight.
+func compactVersion(v string) string {
+	if i := strings.Index(v, "-"); i > 0 {
+		return v[:i]
+	}
+	return v
+}
 
-	return b.String()
+// serverUptime returns the latest reported uptime, or 0 if no health
+// snapshot has landed yet.
+func serverUptime(m Model) time.Duration {
+	if m.insights == nil || m.insights.Health == nil {
+		return 0
+	}
+	hv := m.insights.Health.Latest()
+	if hv.UptimeSeconds == 0 {
+		return 0
+	}
+	return time.Duration(hv.UptimeSeconds) * time.Second
+}
+
+// humanUptime renders durations as "14d 3h", "2h 17m", or "47s" — the
+// longer the uptime, the coarser the granularity, since the operator
+// doesn't care that a 14-day-old server is +47 seconds.
+func humanUptime(d time.Duration) string {
+	if d < time.Minute {
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	}
+	if d < time.Hour {
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	}
+	if d < 24*time.Hour {
+		h := int(d.Hours())
+		m := int(d.Minutes()) - h*60
+		if m == 0 {
+			return fmt.Sprintf("%dh", h)
+		}
+		return fmt.Sprintf("%dh %dm", h, m)
+	}
+	days := int(d.Hours() / 24)
+	hours := int(d.Hours()) - days*24
+	if hours == 0 {
+		return fmt.Sprintf("%dd", days)
+	}
+	return fmt.Sprintf("%dd %dh", days, hours)
+}
+
+// cloudWatchIndicator returns "[cw]●" (bright) when CloudWatch has
+// produced at least one sample, "[cw]○" (dim) when configured but
+// no sample yet, or "" when no CW context exists. Phase 2 will wire
+// the Has* logic; Phase 1 returns "" so the indicator is invisible
+// until the collector lands.
+func cloudWatchIndicator(m Model) string {
+	// Placeholder — Phase 2 (CloudWatch collector) will populate
+	// this from m.insights.CloudWatch.Latest()/Capabilities().
+	return ""
 }
 
 func renderFooter(m Model) string {

@@ -1,9 +1,9 @@
 ## 1. Header chrome rework
 
-- [ ] 1.1 Strip `Server: …`, `Transactions: X | Lock Waits: Y | Processes: Z`, and DB Load sparkline rows from `internal/tui/views.go:renderHeader`.
-- [ ] 1.2 Add right-aligned compact context block: `HH:MM:SS · <version> <variant> · up <duration> · [cw]<dot>`. Variant token follows existing IsRDS/IsAurora/IsMariaDB rules. Uptime comes from `Snapshot.ServerInfo` (add a `Uptime time.Duration` field if not already present, populated from `SHOW GLOBAL STATUS` `Uptime`).
-- [ ] 1.3 `[cw]<dot>` indicator: bright dot when `Insights.CloudWatch.Latest().Time` is non-zero, dim dot when configured but no sample, absent when no CW context. Render via existing `okStyle`/`dimStyle`.
-- [ ] 1.4 Tests: `internal/tui/views_test.go` table tests for header rendering with / without CW configured / with samples.
+- [x] 1.1 Stripped `Server: …`, `Transactions: X | Lock Waits: Y | Processes: Z`, and DB Load sparkline rows from `internal/tui/views.go:renderHeader`. Now strictly chrome — no data.
+- [x] 1.2 Added right-aligned compact context: `HH:MM:SS · <version> <variant> · up <duration> · [cw]<dot>`. Uptime added to `db.HealthVitals.UptimeSeconds`, plus `Uptime` in the existing `SHOW GLOBAL STATUS` cherry-pick (zero new round-trips). `compactVersion` strips build suffixes; `humanUptime` scales granularity with magnitude (47s → 47m → 2h 17m → 14d 3h).
+- [x] 1.3 `cloudWatchIndicator` placeholder added; returns "" today. Phase 2 will wire it once the collector lands so the chrome dot reflects real CW state.
+- [x] 1.4 7 new tests: no-duplicated-counts, right-aligned-segments, omits-context-when-empty, stacks-when-width-unknown, compactVersion table, humanUptime table, uptime-suppressed-without-insights.
 
 ## 2. CloudWatch collector
 
